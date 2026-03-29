@@ -1,0 +1,8 @@
+{
+  "command": "get_logs",
+  "args": {
+    "limit": 100,
+    "since": "2026-03-25T12:00:00Z"
+  },
+  "request_id": "req_001"
+}

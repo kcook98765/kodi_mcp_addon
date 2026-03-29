@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<addon id="service.kodi_mcp" name="Kodi MCP Service" version="0.2.15" provider-name="kodi_mcp">
+    <requires>
+        <import addon="xbmc.python" version="3.0.0"/>
+    </requires>
+    <extension point="xbmc.service" library="service.py" start="startup" end="stop"/>
+    <extension point="xbmc.addon.metadata">
+        <summary>Kodi MCP Service</summary>
+        <description>Minimal local HTTP bridge for Kodi MCP development workflows</description>
+        <platform>all</platform>
+        <license>MIT</license>
+    </extension>
+</addon>
