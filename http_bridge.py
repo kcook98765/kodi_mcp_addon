@@ -343,10 +343,35 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
 
         if parsed.path == "/health":
+            addon = xbmcaddon.Addon()
             self._write_json(
                 {
                     "status": "ok",
                     "service": "service.kodi_mcp",
+                    "addon_id": addon.getAddonInfo("id"),
+                    "version": addon.getAddonInfo("version"),
+                }
+            )
+            return
+
+        if parsed.path == "/ping":
+            addon = xbmcaddon.Addon()
+            timestamp = int(time.time())
+            self._write_json(
+                {
+                    "addon_id": addon.getAddonInfo("id"),
+                    "addon_version": addon.getAddonInfo("version"),
+                    "timestamp": timestamp,
+                }
+            )
+            return
+
+        if parsed.path == "/version":
+            addon = xbmcaddon.Addon()
+            self._write_json(
+                {
+                    "addon_id": addon.getAddonInfo("id"),
+                    "version": addon.getAddonInfo("version"),
                 }
             )
             return
