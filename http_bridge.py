@@ -376,6 +376,40 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
             )
             return
 
+        if parsed.path == "/control/capabilities":
+            addon = xbmcaddon.Addon()
+            self._write_json(
+                {
+                    "addon_id": addon.getAddonInfo("id"),
+                    "control_api_version": 1,
+                    "endpoints": {
+                        "health": {
+                            "method": "GET",
+                            "path": "/health",
+                        },
+                        "ping": {
+                            "method": "GET",
+                            "path": "/ping",
+                        },
+                        "version": {
+                            "method": "GET",
+                            "path": "/version",
+                        },
+                        "debug_ping": {
+                            "method": "POST",
+                            "path": "/debug/ping",
+                        },
+                    },
+                    "features": {
+                        "liveness_probe": True,
+                        "version_probe": True,
+                        "debug_ping": True,
+                        "lifecycle_control": False,
+                    },
+                }
+            )
+            return
+
         if parsed.path == "/status":
             addon = self._get_addon()
             self._write_json(
