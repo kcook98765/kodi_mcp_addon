@@ -587,6 +587,22 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
             self._write_json(result, status=status)
             return
 
+        if parsed.path == "/repo/refresh":
+            xbmc.log("[service.kodi_mcp] Repository refresh requested", xbmc.LOGINFO)
+            content_length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(content_length) if content_length > 0 else b"{}"
+            try:
+                json.loads(body.decode("utf-8"))
+            except Exception:
+                self._write_json({"error": "invalid json body"}, status=400)
+                return
+            try:
+                xbmc.executebuiltin('UpdateAddonRepos', wait=True)
+                self._write_json({"ok": True, "message": "repository refresh initiated"})
+            except Exception:
+                self._write_json({"error": "repository refresh failed"}, status=500)
+            return
+
         self._write_json({"error": "not found"}, status=404)
 
 
