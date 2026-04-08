@@ -8,19 +8,42 @@
       help="Must match the MCP server token (KODI_BRIDGE_TOKEN). Required for registration/state/staging."
       default=""
       option="hidden" />
+
+    <setting
+      id="mcp_token_hint"
+      type="text"
+      label="Must match MCP server token"
+      default=""
+      enable="false" />
   </category>
 
   <category label="Developer">
     <setting
+      id="developer_status_hint"
+      type="text"
+      label="Developer status: Not connected to MCP server"
+      default=""
+      enable="false" />
+
+    <setting
       id="developer_status"
       type="action"
       label="Developer status"
-      action="RunScript($INFO[System.AddonPath(service.kodi_mcp)]resources/lib/developer_setup.py,status)" />
+      action="RunScript(special://home/addons/service.kodi_mcp/resources/lib/developer_setup.py,status)"
+      option="close" />
 
     <setting
       id="developer_setup"
       type="action"
       label="Developer setup"
-      action="RunScript($INFO[System.AddonPath(service.kodi_mcp)]resources/lib/developer_setup.py,setup)" />
+      action="RunScript(special://home/addons/service.kodi_mcp/resources/lib/developer_setup.py,setup)"
+      option="close" />
+
+    <setting
+      id="developer_setup_hint"
+      type="text"
+      label="Requires running MCP server and staged repo zip"
+      default=""
+      enable="false" />
   </category>
 </settings>
