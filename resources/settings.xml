@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<settings>
+  <category label="Kodi MCP">
+    <setting
+      id="mcp_token"
+      type="text"
+      label="MCP shared token"
+      default=""
+      option="hidden" />
+  </category>
+
+  <category label="Developer">
+    <setting
+      id="developer_status"
+      type="action"
+      label="Developer status"
+      action="RunScript($INFO[System.AddonPath(service.kodi_mcp)]resources/lib/developer_setup.py,status)" />
+
+    <setting
+      id="developer_setup"
+      type="action"
+      label="Developer setup"
+      action="RunScript($INFO[System.AddonPath(service.kodi_mcp)]resources/lib/developer_setup.py,setup)" />
+  </category>
+</settings>

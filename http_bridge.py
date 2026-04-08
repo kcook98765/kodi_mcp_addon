@@ -1,8 +1,17 @@
 # -*- coding: utf-8 -*-
-"""Minimal local HTTP bridge for Kodi MCP development."""
+"""Minimal local HTTP bridge for Kodi MCP development.
 
+Milestone A additions:
+- Shared-token authenticated MCP registration + state endpoints
+- Repo zip staging (server -> addon local path)
+- Minimal persisted state in addon_data/service.kodi_mcp/state.json
+"""
+
+import hashlib
+import hmac
 import json
 import os
+import re
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -17,6 +26,184 @@ BRIDGE_BIND_PORT = 8765
 BRIDGE_START_TIME = time.time()
 MAX_FILE_READ_BYTES = 16384
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024
+
+# Milestone A: repo zip staging defaults
+AUTH_HEADER_TOKEN = "X-Kodi-MCP-Token"
+STATE_SCHEMA_VERSION = 1
+STATE_SPECIAL_PATH = "special://profile/addon_data/service.kodi_mcp/state.json"
+DEV_REPO_DIR_SPECIAL = "special://profile/addon_data/service.kodi_mcp/dev_repo"
+MAX_REPO_ZIP_UPLOAD_BYTES = 200 * 1024 * 1024  # 200 MiB
+UPLOAD_CHUNK_SIZE = 64 * 1024
+REPO_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$")
+
+
+def _now_epoch_seconds():
+    return int(time.time())
+
+
+def _translate(special_path):
+    return xbmcvfs.translatePath(special_path)
+
+
+def load_state():
+    """Load persisted state.json (or return an empty initialized state)."""
+
+    translated = _translate(STATE_SPECIAL_PATH)
+    if not xbmcvfs.exists(translated):
+        return {"schema_version": STATE_SCHEMA_VERSION, "state_rev": 0}
+
+    handle = xbmcvfs.File(translated)
+    try:
+        raw = handle.read()
+    finally:
+        handle.close()
+
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", "replace")
+
+    try:
+        state = json.loads(raw or "{}")
+    except Exception:
+        # If state is corrupted, fall back to empty state rather than hard-failing.
+        state = {}
+
+    if not isinstance(state, dict):
+        state = {}
+
+    state.setdefault("schema_version", STATE_SCHEMA_VERSION)
+    state.setdefault("state_rev", 0)
+    return state
+
+
+def save_state(state):
+    """Persist state.json; increments state_rev."""
+
+    if not isinstance(state, dict):
+        state = {"schema_version": STATE_SCHEMA_VERSION, "state_rev": 0}
+
+    state["schema_version"] = STATE_SCHEMA_VERSION
+    state["state_rev"] = int(state.get("state_rev") or 0) + 1
+
+    translated = _translate(STATE_SPECIAL_PATH)
+    parent_dir = os.path.dirname(translated)
+    if parent_dir and not xbmcvfs.exists(parent_dir):
+        xbmcvfs.mkdirs(parent_dir)
+
+    tmp_path = translated + ".tmp"
+    body = json.dumps(state, indent=2, sort_keys=True).encode("utf-8")
+
+    handle = xbmcvfs.File(tmp_path, "wb")
+    try:
+        handle.write(body)
+    finally:
+        handle.close()
+
+    if xbmcvfs.exists(translated):
+        xbmcvfs.delete(translated)
+    xbmcvfs.rename(tmp_path, translated)
+    return state
+
+
+def compute_derived_state(state):
+    """Compute addon-side derived state for both HTTP responses and UI.
+
+    Returns a dict with:
+        now, registration_present, registration_age_seconds, registration_stale,
+        expires_at, repo_zip_present_in_state, repo_zip_file_exists,
+        dev_setup_available
+    """
+
+    now = _now_epoch_seconds()
+    reg = (state or {}).get("registration")
+    repo_zip = (state or {}).get("repo_zip")
+
+    registration_present = isinstance(reg, dict)
+    repo_zip_present_in_state = isinstance(repo_zip, dict)
+
+    if registration_present:
+        last_seen = int(reg.get("last_seen_at") or 0)
+        ttl = int(reg.get("applied_ttl_seconds") or 0)
+        expires_at = last_seen + ttl
+        registration_age_seconds = max(0, now - last_seen)
+        registration_stale = now > expires_at
+    else:
+        expires_at = None
+        registration_age_seconds = None
+        registration_stale = True
+
+    if repo_zip_present_in_state:
+        special_path = str(repo_zip.get("special_path") or "").strip()
+        translated = _translate(special_path) if special_path else ""
+        repo_zip_file_exists = bool(translated and xbmcvfs.exists(translated))
+    else:
+        repo_zip_file_exists = False
+
+    features_ok = False
+    if registration_present:
+        features = reg.get("features") or {}
+        if isinstance(features, dict):
+            features_ok = bool(features.get("repo_zip_staging"))
+
+    dev_setup_available = (
+        registration_present
+        and not registration_stale
+        and features_ok
+        and repo_zip_present_in_state
+        and repo_zip_file_exists
+    )
+
+    return {
+        "now": now,
+        "registration_present": registration_present,
+        "registration_age_seconds": registration_age_seconds,
+        "registration_stale": registration_stale,
+        "expires_at": expires_at,
+        "repo_zip_present_in_state": repo_zip_present_in_state,
+        "repo_zip_file_exists": repo_zip_file_exists,
+        "dev_setup_available": dev_setup_available,
+    }
+
+
+def get_ui_dev_setup_state():
+    """Small helper for UI scripts.
+
+    Returns:
+        {
+          registration_present,
+          registration_stale,
+          repo_zip_present_in_state,
+          repo_zip_file_exists,
+          dev_setup_available,
+          repo_zip_special_path,
+          missing_conditions: [..]
+        }
+    """
+
+    state = load_state()
+    derived = compute_derived_state(state)
+    repo_zip = (state or {}).get("repo_zip") or {}
+    repo_zip_special_path = str(repo_zip.get("special_path") or "").strip() or None
+
+    missing = []
+    if not derived.get("registration_present"):
+        missing.append("no active MCP registration")
+    elif derived.get("registration_stale"):
+        missing.append("registration stale")
+
+    if not derived.get("repo_zip_present_in_state"):
+        missing.append("no staged repo zip metadata")
+    elif not derived.get("repo_zip_file_exists"):
+        missing.append("staged repo zip file missing")
+
+    return {
+        "registration_present": bool(derived.get("registration_present")),
+        "registration_stale": bool(derived.get("registration_stale")),
+        "repo_zip_present_in_state": bool(derived.get("repo_zip_present_in_state")),
+        "repo_zip_file_exists": bool(derived.get("repo_zip_file_exists")),
+        "dev_setup_available": bool(derived.get("dev_setup_available")),
+        "repo_zip_special_path": repo_zip_special_path,
+        "missing_conditions": missing,
+    }
 
 
 class KodiBridgeHandler(BaseHTTPRequestHandler):
@@ -34,6 +221,50 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _write_envelope(self, result, status=200):
+        """Write a Milestone A envelope response."""
+
+        payload = {
+            "transport": {"ok": True},
+            "result": result,
+        }
+        self._write_json(payload, status=status)
+
+    def _require_token_auth(self):
+        """Validate X-Kodi-MCP-Token against addon setting mcp_token."""
+
+        addon = self._get_addon()
+        configured = str(addon.getSetting("mcp_token") or "").strip()
+        provided = str(self.headers.get(AUTH_HEADER_TOKEN) or "").strip()
+
+        if not configured:
+            self._write_envelope(
+                {
+                    "ok": False,
+                    "error_code": "UNAUTHORIZED",
+                    "message": "Bridge token not configured (set addon setting mcp_token)",
+                },
+                status=401,
+            )
+            return False
+
+        if not provided or not hmac.compare_digest(configured, provided):
+            self._write_envelope(
+                {
+                    "ok": False,
+                    "error_code": "UNAUTHORIZED",
+                    "message": "Missing or invalid %s" % AUTH_HEADER_TOKEN,
+                },
+                status=401,
+            )
+            return False
+
+        return True
+
+    def _compute_derived_state(self, state):
+        # Backwards compatible method wrapper.
+        return compute_derived_state(state)
 
     def _get_addon(self):
         return xbmcaddon.Addon()
@@ -399,14 +630,61 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
                             "method": "POST",
                             "path": "/debug/ping",
                         },
+                        "mcp_register": {
+                            "method": "POST",
+                            "path": "/mcp/register",
+                            "auth_required": True,
+                            "auth_header": AUTH_HEADER_TOKEN,
+                        },
+                        "mcp_state": {
+                            "method": "GET",
+                            "path": "/mcp/state",
+                            "auth_required": True,
+                            "auth_header": AUTH_HEADER_TOKEN,
+                        },
+                        "repo_stage": {
+                            "method": "POST",
+                            "path": "/repo/stage",
+                            "auth_required": True,
+                            "auth_header": AUTH_HEADER_TOKEN,
+                        },
                     },
                     "features": {
                         "liveness_probe": True,
                         "version_probe": True,
                         "debug_ping": True,
                         "lifecycle_control": False,
+                        "mcp_registration": True,
+                        "repo_zip_staging": True,
                     },
                 }
+            )
+            return
+
+        if parsed.path == "/mcp/state":
+            if not self._require_token_auth():
+                return
+
+            state = load_state()
+            derived = self._compute_derived_state(state)
+            self._write_envelope(
+                {
+                    "ok": True,
+                    "schema_version": int(state.get("schema_version") or STATE_SCHEMA_VERSION),
+                    "state_rev": int(state.get("state_rev") or 0),
+                    "registration": state.get("registration"),
+                    "repo_zip": state.get("repo_zip"),
+                    "derived": {
+                        "now": derived.get("now"),
+                        "registration_present": derived.get("registration_present"),
+                        "registration_age_seconds": derived.get("registration_age_seconds"),
+                        "registration_stale": derived.get("registration_stale"),
+                        "repo_zip_present_in_state": derived.get("repo_zip_present_in_state"),
+                        "repo_zip_file_exists": derived.get("repo_zip_file_exists"),
+                        "dev_setup_available": derived.get("dev_setup_available"),
+                    },
+                },
+                status=200,
             )
             return
 
@@ -585,6 +863,347 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
             body = self.rfile.read(content_length) if content_length > 0 else b""
             result, status = self._upload_addon_zip(filename, body)
             self._write_json(result, status=status)
+            return
+
+        if parsed.path == "/mcp/register":
+            if not self._require_token_auth():
+                return
+
+            content_length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(content_length) if content_length > 0 else b"{}"
+            try:
+                payload = json.loads(body.decode("utf-8"))
+            except Exception:
+                self._write_envelope(
+                    {"ok": False, "error_code": "INVALID_JSON", "message": "invalid json body"},
+                    status=400,
+                )
+                return
+
+            if not isinstance(payload, dict):
+                self._write_envelope(
+                    {"ok": False, "error_code": "INVALID_JSON", "message": "json body must be an object"},
+                    status=400,
+                )
+                return
+
+            required = [
+                "control_api_version",
+                "server_id",
+                "server_instance_id",
+                "server_base_url",
+                "ttl_seconds",
+            ]
+            missing = []
+            for k in required:
+                if k in ("control_api_version", "ttl_seconds"):
+                    if payload.get(k) is None:
+                        missing.append(k)
+                else:
+                    if not str(payload.get(k) or "").strip():
+                        missing.append(k)
+            if missing:
+                self._write_envelope(
+                    {
+                        "ok": False,
+                        "error_code": "MISSING_FIELDS",
+                        "message": "missing required fields",
+                        "missing": missing,
+                    },
+                    status=400,
+                )
+                return
+
+            try:
+                control_api_version = int(payload.get("control_api_version"))
+            except Exception:
+                self._write_envelope(
+                    {"ok": False, "error_code": "INVALID_FIELD", "field": "control_api_version"},
+                    status=400,
+                )
+                return
+
+            if control_api_version != 1:
+                self._write_envelope(
+                    {
+                        "ok": False,
+                        "error_code": "UNSUPPORTED_CONTROL_API_VERSION",
+                        "supported": [1],
+                    },
+                    status=200,
+                )
+                return
+
+            try:
+                requested_ttl = int(payload.get("ttl_seconds"))
+            except Exception:
+                self._write_envelope(
+                    {"ok": False, "error_code": "INVALID_FIELD", "field": "ttl_seconds"},
+                    status=400,
+                )
+                return
+
+            applied_ttl = max(10, min(3600, requested_ttl))
+            now = _now_epoch_seconds()
+            features_in = payload.get("features") or {}
+            repo_zip_staging = False
+            if isinstance(features_in, dict):
+                repo_zip_staging = bool(features_in.get("repo_zip_staging"))
+
+            started_at_in = payload.get("started_at")
+            try:
+                started_at = int(started_at_in) if started_at_in is not None else None
+            except Exception:
+                started_at = None
+
+            registration = {
+                "control_api_version": control_api_version,
+                "server_id": str(payload.get("server_id") or "").strip(),
+                "server_instance_id": str(payload.get("server_instance_id") or "").strip(),
+                "server_base_url": str(payload.get("server_base_url") or "").strip(),
+                "mcp_endpoint_url": str(payload.get("mcp_endpoint_url") or "").strip() or None,
+                "server_version": str(payload.get("server_version") or "").strip() or None,
+                "started_at": started_at,
+                "registered_at": now,
+                "last_seen_at": now,
+                "requested_ttl_seconds": requested_ttl,
+                "applied_ttl_seconds": applied_ttl,
+                "features": {"repo_zip_staging": repo_zip_staging},
+            }
+
+            state = load_state()
+            state["registration"] = registration
+            state = save_state(state)
+
+            expires_at = now + applied_ttl
+            self._write_envelope(
+                {
+                    "ok": True,
+                    "action": "registered_or_refreshed",
+                    "state_rev": int(state.get("state_rev") or 0),
+                    "stored_at": now,
+                    "registration": registration,
+                    "derived": {
+                        "expires_at": expires_at,
+                        "registration_stale": False,
+                    },
+                },
+                status=200,
+            )
+            return
+
+        if parsed.path == "/repo/stage":
+            if not self._require_token_auth():
+                return
+
+            query = parse_qs(parsed.query)
+            repo_id = str(query.get("repo_id", [""])[0] or "").strip()
+            if not repo_id:
+                self._write_envelope(
+                    {"ok": False, "error_code": "MISSING_FIELD", "field": "repo_id"},
+                    status=400,
+                )
+                return
+
+            if not REPO_ID_RE.match(repo_id):
+                self._write_envelope(
+                    {
+                        "ok": False,
+                        "error_code": "INVALID_FIELD",
+                        "field": "repo_id",
+                        "message": "repo_id must match %s" % REPO_ID_RE.pattern,
+                    },
+                    status=400,
+                )
+                return
+
+            mode = str(query.get("mode", ["overwrite"])[0] or "overwrite").strip().lower()
+            if mode not in ("overwrite", "fail_if_exists"):
+                self._write_envelope(
+                    {
+                        "ok": False,
+                        "error_code": "INVALID_FIELD",
+                        "field": "mode",
+                        "allowed": ["overwrite", "fail_if_exists"],
+                    },
+                    status=400,
+                )
+                return
+
+            content_type = str(self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            if content_type != "application/zip":
+                self._write_envelope(
+                    {
+                        "ok": False,
+                        "error_code": "INVALID_CONTENT_TYPE",
+                        "expected": "application/zip",
+                        "actual": content_type,
+                    },
+                    status=400,
+                )
+                return
+
+            raw_len = str(self.headers.get("Content-Length") or "").strip()
+            if not raw_len:
+                self._write_envelope(
+                    {"ok": False, "error_code": "MISSING_HEADER", "header": "Content-Length"},
+                    status=400,
+                )
+                return
+
+            try:
+                content_length = int(raw_len)
+            except Exception:
+                self._write_envelope(
+                    {"ok": False, "error_code": "INVALID_HEADER", "header": "Content-Length"},
+                    status=400,
+                )
+                return
+
+            if content_length < 0:
+                self._write_envelope(
+                    {"ok": False, "error_code": "INVALID_HEADER", "header": "Content-Length"},
+                    status=400,
+                )
+                return
+
+            if content_length > MAX_REPO_ZIP_UPLOAD_BYTES:
+                self._write_envelope(
+                    {
+                        "ok": False,
+                        "error_code": "PAYLOAD_TOO_LARGE",
+                        "max_bytes": MAX_REPO_ZIP_UPLOAD_BYTES,
+                        "size_bytes": content_length,
+                    },
+                    status=413,
+                )
+                return
+
+            expected_sha256 = str(self.headers.get("X-Content-SHA256") or "").strip().lower() or None
+            if expected_sha256 is not None:
+                if not re.match(r"^[0-9a-f]{64}$", expected_sha256):
+                    self._write_envelope(
+                        {
+                            "ok": False,
+                            "error_code": "INVALID_HEADER",
+                            "header": "X-Content-SHA256",
+                        },
+                        status=400,
+                    )
+                    return
+
+            repo_version = str(self.headers.get("X-Repo-Version") or "").strip() or None
+
+            # Prepare paths
+            dir_translated = _translate(DEV_REPO_DIR_SPECIAL)
+            if not xbmcvfs.exists(dir_translated):
+                xbmcvfs.mkdirs(dir_translated)
+
+            special_tmp = "%s/%s.zip.tmp" % (DEV_REPO_DIR_SPECIAL.rstrip("/"), repo_id)
+            special_final = "%s/%s.zip" % (DEV_REPO_DIR_SPECIAL.rstrip("/"), repo_id)
+            tmp_translated = _translate(special_tmp)
+            final_translated = _translate(special_final)
+
+            if mode == "fail_if_exists" and xbmcvfs.exists(final_translated):
+                self._write_envelope(
+                    {"ok": False, "error_code": "ALREADY_EXISTS", "message": "repo zip already staged"},
+                    status=200,
+                )
+                return
+
+            # Stream upload to tmp and compute SHA256
+            sha = hashlib.sha256()
+            remaining = content_length
+            handle = xbmcvfs.File(tmp_translated, "wb")
+            bytes_written = 0
+            try:
+                while remaining > 0:
+                    to_read = UPLOAD_CHUNK_SIZE if remaining > UPLOAD_CHUNK_SIZE else remaining
+                    chunk = self.rfile.read(to_read)
+                    if not chunk:
+                        break
+                    sha.update(chunk)
+                    handle.write(chunk)
+                    bytes_written += len(chunk)
+                    remaining -= len(chunk)
+            finally:
+                handle.close()
+
+            if bytes_written != content_length:
+                if xbmcvfs.exists(tmp_translated):
+                    xbmcvfs.delete(tmp_translated)
+                self._write_envelope(
+                    {
+                        "ok": False,
+                        "error_code": "INCOMPLETE_UPLOAD",
+                        "expected_bytes": content_length,
+                        "received_bytes": bytes_written,
+                    },
+                    status=400,
+                )
+                return
+
+            actual_sha256 = sha.hexdigest()
+            if expected_sha256 and not hmac.compare_digest(expected_sha256, actual_sha256):
+                if xbmcvfs.exists(tmp_translated):
+                    xbmcvfs.delete(tmp_translated)
+                self._write_envelope(
+                    {
+                        "ok": False,
+                        "error_code": "CHECKSUM_MISMATCH",
+                        "expected_sha256": expected_sha256,
+                        "actual_sha256": actual_sha256,
+                    },
+                    status=200,
+                )
+                return
+
+            # Activate: overwrite active staged zip directly
+            if xbmcvfs.exists(final_translated):
+                xbmcvfs.delete(final_translated)
+            if not xbmcvfs.rename(tmp_translated, final_translated):
+                # best-effort cleanup
+                if xbmcvfs.exists(tmp_translated):
+                    xbmcvfs.delete(tmp_translated)
+                self._write_envelope(
+                    {"ok": False, "error_code": "STAGE_FAILED", "message": "failed to activate staged zip"},
+                    status=500,
+                )
+                return
+
+            now = _now_epoch_seconds()
+            repo_zip = {
+                "repo_id": repo_id,
+                "repo_version": repo_version,
+                "special_path": special_final,
+                "size_bytes": content_length,
+                "sha256": actual_sha256,
+                "staged_at": now,
+            }
+
+            state = load_state()
+            state["repo_zip"] = repo_zip
+            state = save_state(state)
+
+            self._write_envelope(
+                {
+                    "ok": True,
+                    "state_rev": int(state.get("state_rev") or 0),
+                    "repo_zip": {
+                        "repo_id": repo_zip.get("repo_id"),
+                        "repo_version": repo_zip.get("repo_version"),
+                        "special_path": repo_zip.get("special_path"),
+                        "translated_path": final_translated,
+                        "size_bytes": repo_zip.get("size_bytes"),
+                        "sha256": repo_zip.get("sha256"),
+                        "staged_at": repo_zip.get("staged_at"),
+                    },
+                    "derived": {
+                        "repo_zip_file_exists": xbmcvfs.exists(final_translated),
+                    },
+                },
+                status=200,
+            )
             return
 
         if parsed.path == "/repo/refresh":
