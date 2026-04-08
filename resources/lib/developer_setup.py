@@ -9,12 +9,26 @@ This script is intentionally thin:
 - opens Kodi's native Addons browser so user can run "Install from zip file"
 """
 
+import os
 import sys
 
 from typing import List
 
 import xbmc
 import xbmcgui
+
+
+def _bootstrap_addon_root_on_sys_path() -> None:
+    """Ensure addon root is on sys.path when invoked via RunScript without addon context."""
+
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        addon_root = os.path.dirname(os.path.dirname(here))
+        if addon_root and addon_root not in sys.path:
+            sys.path.insert(0, addon_root)
+    except Exception:
+        # Best-effort only; avoid breaking UI actions due to path resolution issues.
+        return
 
 
 def _get_action() -> str:
@@ -104,6 +118,7 @@ def main() -> None:
     action = _get_action()
 
     # Import within Kodi runtime.
+    _bootstrap_addon_root_on_sys_path()
     from http_bridge import get_ui_dev_setup_state
 
     state = get_ui_dev_setup_state()
