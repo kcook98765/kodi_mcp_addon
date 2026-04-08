@@ -11,6 +11,14 @@ Kodi-resident HTTP bridge service for MCP development workflows.
 
 It does **not** silently install zips or manage source repositories.
 
+## MCP server requirement (for agent use)
+
+- This addon is only the **Kodi-side bridge**.
+- To enable agent-driven workflows, you must run the MCP server separately:
+  https://github.com/kcook98765/kodi_mcp_server
+- The MCP server provides the managed addon workflow, build/publish/stage loop, and the MCP tool interface for agents.
+- Without the MCP server, this addon can be used manually via HTTP endpoints, but not for automated agent workflows.
+
 ## Repo Structure
 
 This repo IS the addon. The root directory contains:
