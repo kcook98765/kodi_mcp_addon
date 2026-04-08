@@ -5,6 +5,7 @@
       id="mcp_token"
       type="text"
       label="MCP shared token"
+      help="Must match the MCP server token (KODI_BRIDGE_TOKEN). Required for registration/state/staging."
       default=""
       option="hidden" />
   </category>

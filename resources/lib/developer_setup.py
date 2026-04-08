@@ -41,6 +41,14 @@ def _format_unavailable_message(missing_conditions: list[str]) -> list[str]:
 
 def _show_status_dialog(state: dict) -> None:
     title = "Developer status"
+    if not state.get("registration_present"):
+        xbmcgui.Dialog().ok(
+            title,
+            "Not connected to MCP server\n"
+            "No repo staged\n"
+            "Developer setup not available",
+        )
+        return
     lines = [
         f"MCP registration present: {'yes' if state.get('registration_present') else 'no'}",
         f"MCP registration stale: {'yes' if state.get('registration_stale') else 'no'}",
@@ -60,8 +68,13 @@ def _handle_setup_action(state: dict) -> None:
     dialog = xbmcgui.Dialog()
 
     if not state.get("dev_setup_available"):
-        lines = _format_unavailable_message(state.get("missing_conditions") or [])
-        dialog.ok("Developer setup", "\n".join(lines))
+        dialog.ok(
+            "Developer setup not available",
+            "MCP server must be running and registered.\n"
+            "Token must match addon setting.\n"
+            "Repo zip must be staged.\n"
+            "Hint: MCP server must reach Kodi at http://<host>:8765",
+        )
         return
 
     repo_path = state.get("repo_zip_special_path") or "(unknown)"
