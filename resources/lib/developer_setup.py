@@ -11,6 +11,8 @@ This script is intentionally thin:
 
 import sys
 
+from typing import List
+
 import xbmc
 import xbmcgui
 
@@ -28,7 +30,7 @@ def _open_addons_browser_install_from_zip_flow() -> None:
     xbmc.executebuiltin("InstallFromZip")
 
 
-def _format_unavailable_message(missing_conditions: list[str]) -> list[str]:
+def _format_unavailable_message(missing_conditions: List[str]) -> List[str]:
     lines = ["Developer setup is not available.", ""]
     if missing_conditions:
         lines.append("Reasons:")
