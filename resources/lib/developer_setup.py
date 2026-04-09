@@ -179,7 +179,13 @@ def _handle_setup_action(state: dict) -> None:
     _open_addons_browser_install_from_zip_flow()
 
     try:
-        xbmcgui.Dialog().notification("Developer setup", "Browse to the staged repo folder", xbmcgui.NOTIFICATION_INFO, 3000)
+        xbmcgui.Dialog().notification(
+            "Developer setup",
+            str(folder_display),
+            xbmcgui.NOTIFICATION_INFO,
+            60000,
+            False,
+        )
     except Exception:
         pass
 
