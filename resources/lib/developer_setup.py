@@ -55,17 +55,34 @@ def _format_unavailable_message(missing_conditions: List[str]) -> List[str]:
     return lines
 
 
+def _compute_phase(state: dict) -> str:
+    if not state.get("registration_present"):
+        return "NOT_CONNECTED"
+    if state.get("registration_stale"):
+        return "STALE"
+    if state.get("dev_setup_available"):
+        return "READY_FOR_INSTALL"
+    return "CONNECTED"
+
+
+def _next_step_for_phase(phase: str) -> str:
+    if phase == "NOT_CONNECTED":
+        return "Start MCP server and ensure token matches"
+    if phase == "STALE":
+        return "Wait for MCP server to refresh registration"
+    if phase == "READY_FOR_INSTALL":
+        return "Run Developer setup to install"
+    return "Have MCP server stage the dev repo zip"
+
+
 def _show_status_dialog(state: dict) -> None:
     title = "Developer status"
-    if not state.get("registration_present"):
-        xbmcgui.Dialog().ok(
-            title,
-            "Not connected to MCP server\n"
-            "No repo staged\n"
-            "Developer setup not available",
-        )
-        return
+    phase = _compute_phase(state)
+    next_step = _next_step_for_phase(phase)
     lines = [
+        f"Phase: {phase}",
+        f"Next step: {next_step}",
+        "",
         f"MCP registration present: {'yes' if state.get('registration_present') else 'no'}",
         f"MCP registration stale: {'yes' if state.get('registration_stale') else 'no'}",
         f"Repo zip metadata present: {'yes' if state.get('repo_zip_present_in_state') else 'no'}",
@@ -84,6 +101,28 @@ def _handle_setup_action(state: dict) -> None:
     dialog = xbmcgui.Dialog()
 
     if not state.get("dev_setup_available"):
+        phase = _compute_phase(state)
+        if phase == "NOT_CONNECTED":
+            dialog.ok(
+                "Developer setup not available",
+                "Not connected to MCP server.\n"
+                "Start server and ensure token matches.",
+            )
+            return
+        if phase == "STALE":
+            dialog.ok(
+                "Developer setup not available",
+                "MCP registration is stale.\n"
+                "Wait for refresh or restart server.",
+            )
+            return
+        if phase == "CONNECTED":
+            dialog.ok(
+                "Developer setup not available",
+                "Connected to MCP server.\n"
+                "Next step: stage the dev repo zip.",
+            )
+            return
         dialog.ok(
             "Developer setup not available",
             "MCP server must be running and registered.\n"

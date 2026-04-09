@@ -21,7 +21,7 @@
     <setting
       id="developer_status_hint"
       type="text"
-      label="Developer status: Not connected to MCP server"
+      label="Developer status: click 'Developer status'"
       default=""
       enable="false" />
 
