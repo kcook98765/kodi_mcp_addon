@@ -13,7 +13,7 @@ import os
 import sys
 from pathlib import Path
 
-from typing import List
+from typing import List, Optional, Tuple
 
 import xbmc
 import xbmcgui
@@ -46,7 +46,7 @@ def _open_addons_browser_install_from_zip_flow() -> None:
     xbmc.executebuiltin("InstallFromZip")
 
 
-def _translate_repo_zip_path(repo_zip_special_path: str | None) -> tuple[str | None, str | None]:
+def _translate_repo_zip_path(repo_zip_special_path: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
     """Translate special:// repo zip path to a native OS path + its parent folder.
 
     Returns:
