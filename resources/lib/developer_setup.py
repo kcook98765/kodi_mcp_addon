@@ -133,12 +133,12 @@ def _handle_setup_action(state: dict) -> None:
         return
 
     repo_path = state.get("repo_zip_special_path") or "(unknown)"
-    ok = dialog.yesno(
-        "Developer setup",
-        "Developer repo zip is staged and ready.",
-        f"Location: {repo_path}",
-        "Kodi will now open: Install from zip file",
+    body = (
+        "Developer repo zip is staged and ready.\n"
+        f"Location: {repo_path}\n"
+        "Kodi will now open: Install from zip file"
     )
+    ok = dialog.yesno("Developer setup", body, nolabel="Cancel", yeslabel="Continue")
     if not ok:
         return
 
