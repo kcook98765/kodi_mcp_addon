@@ -6,7 +6,7 @@ Kodi-resident HTTP bridge service for MCP development workflows.
 
 - Thin HTTP bridge to Kodi (JSON-RPC + builtin helpers)
 - Stores MCP server registration state locally (persisted under addon_data)
-- Can stage a **dev repo zip** into Kodi-local storage for installation
+- Receives a **dev repo zip** from the MCP server and stores it in Kodi-local storage for installation
 - Provides a **user-guided** Developer setup flow (opens Kodi’s Install-from-zip UI)
 
 It does **not** silently install zips or manage source repositories.
@@ -18,6 +18,17 @@ It does **not** silently install zips or manage source repositories.
   https://github.com/kcook98765/kodi_mcp_server
 - The MCP server provides the managed addon workflow, build/publish/stage loop, and the MCP tool interface for agents.
 - Without the MCP server, this addon can be used manually via HTTP endpoints, but not for automated agent workflows.
+
+## First-time setup (recommended flow)
+
+1) Install + enable **Kodi MCP Service** (`service.kodi_mcp`)
+2) Set the shared token:
+   **Kodi → Add-ons → Services → Kodi MCP Service → Configure → Kodi MCP → MCP shared token**
+3) Start the MCP server
+4) Wait briefly: the MCP server will **auto-register** with the addon and **auto-stage** the dev repo zip
+5) In Kodi: **Developer → Developer setup → Install from zip file**
+
+No separate/manual staging step is required for first-time readiness.
 
 ## Repo Structure
 
@@ -40,7 +51,7 @@ This repo IS the addon. The root directory contains:
 
 ## Files
 
-- `addon.xml` - Version 0.2.15, points to `service.py` as entry point
+- `addon.xml` - Addon manifest, points to `service.py` as entry point
 - `service.py` - Runs HTTP bridge on port 8765
 - `http_bridge.py` - Implements HTTP bridge with endpoints:
   - `/health` - Health check
@@ -71,8 +82,8 @@ Unprotected:
 
 ### Developer setup flow (user-guided)
 
-1) MCP server registers with the addon (`POST /mcp/register`)
-2) MCP server stages a repo zip to Kodi-local storage (`POST /repo/stage`)
+1) MCP server automatically registers with the addon (refreshes `POST /mcp/register` as needed)
+2) MCP server automatically stages the dev repo zip to Kodi-local storage (`POST /repo/stage`)
 3) In Kodi, the user opens:
    **Kodi → Add-ons → Services → Kodi MCP Service → Configure**
 4) Then:
