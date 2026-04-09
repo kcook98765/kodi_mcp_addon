@@ -11,11 +11,13 @@ This script is intentionally thin:
 
 import os
 import sys
+from pathlib import Path
 
 from typing import List
 
 import xbmc
 import xbmcgui
+import xbmcvfs
 
 
 def _bootstrap_addon_root_on_sys_path() -> None:
@@ -42,6 +44,33 @@ def _open_addons_browser_install_from_zip_flow() -> None:
     """Open Kodi's native "Install from zip file" flow."""
 
     xbmc.executebuiltin("InstallFromZip")
+
+
+def _translate_repo_zip_path(repo_zip_special_path: str | None) -> tuple[str | None, str | None]:
+    """Translate special:// repo zip path to a native OS path + its parent folder.
+
+    Returns:
+        (translated_zip_path, translated_folder_path)
+    """
+
+    special = str(repo_zip_special_path or "").strip()
+    if not special:
+        return None, None
+
+    try:
+        translated = xbmcvfs.translatePath(special)
+    except Exception:
+        translated = ""
+
+    translated = str(translated or "").strip() or None
+    if not translated:
+        return None, None
+
+    try:
+        folder = str(Path(translated).parent)
+    except Exception:
+        folder = None
+    return translated, folder
 
 
 def _format_unavailable_message(missing_conditions: List[str]) -> List[str]:
@@ -132,11 +161,15 @@ def _handle_setup_action(state: dict) -> None:
         )
         return
 
-    repo_path = state.get("repo_zip_special_path") or "(unknown)"
+    repo_special_path = state.get("repo_zip_special_path")
+    repo_path_display = repo_special_path or "(unknown)"
+    translated_zip, translated_folder = _translate_repo_zip_path(repo_special_path)
+    folder_display = translated_folder or repo_path_display
     body = (
-        "Developer repo zip is staged and ready.\n"
-        f"Location: {repo_path}\n"
-        "Kodi will now open: Install from zip file"
+        "The repository zip is ready.\n"
+        "Kodi will now open Install from zip file.\n\n"
+        f"Browse to this folder:\n{folder_display}\n\n"
+        "Select the repository zip inside that folder."
     )
     ok = dialog.yesno("Developer setup", body, nolabel="Cancel", yeslabel="Continue")
     if not ok:
@@ -145,11 +178,16 @@ def _handle_setup_action(state: dict) -> None:
     # Open native flow (user-driven install)
     _open_addons_browser_install_from_zip_flow()
 
+    try:
+        xbmcgui.Dialog().notification("Developer setup", "Browse to the staged repo folder", xbmcgui.NOTIFICATION_INFO, 3000)
+    except Exception:
+        pass
+
     dialog.ok(
         "Developer setup",
-        "Install from zip file opened.",
-        "You still need to browse to the staged zip manually.",
-        f"Path: {repo_path}",
+        "Install from zip file opened.\n"
+        "Browse to the staged repo folder and select the repository zip.\n\n"
+        f"Folder: {folder_display}",
     )
 
 
