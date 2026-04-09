@@ -31,6 +31,16 @@ It does **not** silently install zips or manage source repositories.
 
 No separate/manual staging step is required for first-time readiness.
 
+## Repo workflow (publish/install/update)
+
+The repo publish/install/update behavior is documented in the **server runbook**:
+
+- https://github.com/kcook98765/kodi_mcp_server/blob/main/project-config/REPO_WORKFLOW_RUNBOOK.md
+
+Key rule:
+- A **brand-new addon** published into the repo requires a **one-time manual install** by the user in Kodi UI.
+- After the addon has been installed once, updates can be automated via the MCP server.
+
 ## Repo Structure
 
 This repo IS the addon. The root directory contains:
