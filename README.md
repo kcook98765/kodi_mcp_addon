@@ -25,7 +25,8 @@ It does **not** silently install zips or manage source repositories.
 2) Set the shared token:
    **Kodi → Add-ons → Services → Kodi MCP Service → Configure → Kodi MCP → MCP shared token**
 3) Start the MCP server
-4) Wait briefly: the MCP server will **auto-register** with the addon and **auto-stage** the dev repo zip
+4) Wait ~5–15 seconds: the MCP server will **auto-register** with the addon and **auto-stage** the dev repo zip
+   You should see **Developer status** become ready.
 5) In Kodi: **Developer → Developer setup → Install from zip file**
 
 No separate/manual staging step is required for first-time readiness.
@@ -82,8 +83,7 @@ Unprotected:
 
 ### Developer setup flow (user-guided)
 
-1) MCP server automatically registers with the addon (refreshes `POST /mcp/register` as needed)
-2) MCP server automatically stages the dev repo zip to Kodi-local storage (`POST /repo/stage`)
+1) MCP server automatically registers and stages the dev repo zip (refreshes `POST /mcp/register` and `POST /repo/stage` as needed)
 3) In Kodi, the user opens:
    **Kodi → Add-ons → Services → Kodi MCP Service → Configure**
 4) Then:
