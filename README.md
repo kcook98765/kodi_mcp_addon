@@ -51,8 +51,13 @@ This repo IS the addon. The root directory contains:
 
 ## Installation
 
-1. Clone repo to Kodi addon directory or zip and install directly
-2. Or add to Kodi via repository (if hosted on dev repo)
+1. Clone repo to Kodi addon directory or zip and install directly.
+2. Or add to Kodi via repository if hosted on a dev repo.
+3. Configure the shared token when Kodi is reachable from another host:
+   **Kodi → Add-ons → Services → Kodi MCP Service → Configure → Kodi MCP → MCP shared token**
+4. Set the same value on the MCP server as `KODI_BRIDGE_TOKEN`.
+
+For split-host deployments, the MCP server should use `KODI_BRIDGE_BASE_URL=http://<kodi-host>:8765`.
 
 ## Development
 
@@ -68,6 +73,9 @@ This repo IS the addon. The root directory contains:
   - `/health` - Health check
   - `/status` - Version and runtime info
   - `/runtime/info` - Addon paths and configuration
+  - `/capabilities`, `/control/capabilities` - Bridge capabilities
+  - `/gui/action` - Basic GUI navigation actions
+  - `/gui/screenshot` - Captures a Kodi screenshot
   - `/debug/ping` - Liveness check with timestamp
   - `/addon/*` - Addon management and version checking
   - `/log/*` - Log inspection and marker logging
@@ -80,6 +88,8 @@ This repo IS the addon. The root directory contains:
   - **service.kodi_mcp → mcp_token**
 - Protected endpoints require header:
   - **`X-Kodi-MCP-Token: <token>`**
+- If `mcp_token` is blank, protected endpoints are accepted without a token for local development.
+- If `mcp_token` is set, all non-health/status/runtime/capabilities endpoints require the token.
 
 ### Milestone A endpoints
 
@@ -87,9 +97,13 @@ Protected (require `X-Kodi-MCP-Token`):
 - `POST /mcp/register` — Register/refresh MCP server identity + TTL
 - `GET /mcp/state` — Read persisted registration + staging state
 - `POST /repo/stage` — Upload/stage dev repo zip to Kodi-local path
+- `POST /gui/action` — Send `up`, `down`, `left`, `right`, `select`, `back`, `home`, `context`, or `info`
+- `GET /gui/screenshot` — Capture a PNG screenshot under addon profile data, optionally with base64 image content
 
 Unprotected:
-- `POST /repo/refresh` — Ask Kodi to refresh repositories (best-effort)
+- `GET /health`, `GET /status`, `GET /runtime/info`, `GET /capabilities`, `GET /control/capabilities`
+
+When the MCP server stores screenshots server-side, remote clients receive a server `/screenshots/<id>.png` URL instead of a large inline image by default.
 
 ### Developer setup flow (user-guided)
 

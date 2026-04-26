@@ -7,6 +7,7 @@ Milestone A additions:
 - Minimal persisted state in addon_data/service.kodi_mcp/state.json
 """
 
+import base64
 import hashlib
 import hmac
 import json
@@ -35,6 +36,17 @@ DEV_REPO_DIR_SPECIAL = "special://profile/addon_data/service.kodi_mcp/dev_repo"
 MAX_REPO_ZIP_UPLOAD_BYTES = 200 * 1024 * 1024  # 200 MiB
 UPLOAD_CHUNK_SIZE = 64 * 1024
 REPO_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$")
+GUI_ACTIONS = {
+    "up": "Input.Up",
+    "down": "Input.Down",
+    "left": "Input.Left",
+    "right": "Input.Right",
+    "select": "Input.Select",
+    "back": "Input.Back",
+    "home": "Input.Home",
+    "context": "Input.ContextMenu",
+    "info": "Input.Info",
+}
 
 
 def _now_epoch_seconds():
@@ -239,15 +251,7 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
         provided = str(self.headers.get(AUTH_HEADER_TOKEN) or "").strip()
 
         if not configured:
-            self._write_envelope(
-                {
-                    "ok": False,
-                    "error_code": "UNAUTHORIZED",
-                    "message": "Bridge token not configured (set addon setting mcp_token)",
-                },
-                status=401,
-            )
-            return False
+            return True
 
         if not provided or not hmac.compare_digest(configured, provided):
             self._write_envelope(
@@ -261,6 +265,55 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
             return False
 
         return True
+
+    def _is_public_get_path(self, path):
+        return path in ("/health", "/status", "/runtime/info", "/capabilities", "/control/capabilities")
+
+    def _read_json_body(self):
+        content_length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(content_length) if content_length > 0 else b"{}"
+        try:
+            return json.loads(body.decode("utf-8")), None
+        except Exception:
+            return None, "invalid json body"
+
+    def _jsonrpc(self, method, params=None):
+        payload = {
+            "jsonrpc": "2.0",
+            "id": "bridge-%s" % int(time.time() * 1000),
+            "method": method,
+        }
+        if params is not None:
+            payload["params"] = params
+
+        raw = xbmc.executeJSONRPC(json.dumps(payload))
+        try:
+            return json.loads(raw), None
+        except Exception as exc:
+            return None, "invalid json-rpc response: %s" % exc
+
+    def _gui_action(self, action):
+        action = str(action or "").strip().lower()
+        method = GUI_ACTIONS.get(action)
+        if not method:
+            return {
+                "error": "unsupported gui action",
+                "action": action,
+                "allowed": sorted(GUI_ACTIONS.keys()),
+            }, 400
+
+        response, error = self._jsonrpc(method)
+        if error:
+            return {"error": error, "action": action, "method": method}, 500
+        if isinstance(response, dict) and response.get("error"):
+            return {
+                "error": response.get("error"),
+                "action": action,
+                "method": method,
+                "jsonrpc": response,
+            }, 500
+
+        return {"ok": True, "action": action, "method": method, "jsonrpc": response}, 200
 
     def _compute_derived_state(self, state):
         # Backwards compatible method wrapper.
@@ -290,6 +343,56 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
 
     def _get_upload_staging_dir(self):
         return xbmcvfs.translatePath("special://profile/addon_data/service.kodi_mcp/uploads")
+
+    def _get_screenshot_dir(self):
+        return xbmcvfs.translatePath("special://profile/addon_data/service.kodi_mcp/screenshots")
+
+    def _read_binary_file(self, path):
+        with open(path, "rb") as handle:
+            return handle.read()
+
+    def _capture_screenshot(self, include_image=False):
+        screenshot_dir = self._get_screenshot_dir()
+        if not xbmcvfs.exists(screenshot_dir):
+            xbmcvfs.mkdirs(screenshot_dir)
+
+        filename = "screenshot-%s.png" % int(time.time() * 1000)
+        path = os.path.join(screenshot_dir, filename)
+        xbmc.executebuiltin("TakeScreenshot(%s,true)" % path, wait=True)
+
+        deadline = time.time() + 3
+        content = b""
+        while time.time() < deadline:
+            if xbmcvfs.exists(path):
+                content = self._read_binary_file(path)
+                if len(content or b"") > 0:
+                    break
+            time.sleep(0.2)
+
+        if not xbmcvfs.exists(path):
+            return {
+                "ok": False,
+                "path": path,
+                "error": "screenshot file not observed after request",
+            }, 202
+
+        if len(content or b"") == 0:
+            return {
+                "ok": False,
+                "path": path,
+                "error": "screenshot file was created but remained empty",
+            }, 202
+
+        result = {
+            "ok": True,
+            "path": path,
+            "filename": os.path.basename(path),
+            "size_bytes": len(content or b""),
+            "content_type": "image/png",
+        }
+        if include_image:
+            result["image_base64"] = base64.b64encode(content or b"").decode("ascii")
+        return result, 200
 
     def _get_runtime_info(self):
         addon = self._get_addon()
@@ -573,6 +676,9 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
 
+        if not self._is_public_get_path(parsed.path) and not self._require_token_auth():
+            return
+
         if parsed.path == "/health":
             addon = xbmcaddon.Addon()
             self._write_json(
@@ -607,7 +713,7 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
             )
             return
 
-        if parsed.path == "/control/capabilities":
+        if parsed.path in ("/capabilities", "/control/capabilities"):
             addon = xbmcaddon.Addon()
             self._write_json(
                 {
@@ -648,6 +754,18 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
                             "auth_required": True,
                             "auth_header": AUTH_HEADER_TOKEN,
                         },
+                        "gui_action": {
+                            "method": "POST",
+                            "path": "/gui/action",
+                            "auth_required": True,
+                            "auth_header": AUTH_HEADER_TOKEN,
+                        },
+                        "gui_screenshot": {
+                            "method": "GET",
+                            "path": "/gui/screenshot",
+                            "auth_required": True,
+                            "auth_header": AUTH_HEADER_TOKEN,
+                        },
                     },
                     "features": {
                         "liveness_probe": True,
@@ -656,6 +774,8 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
                         "lifecycle_control": False,
                         "mcp_registration": True,
                         "repo_zip_staging": True,
+                        "gui_actions": sorted(GUI_ACTIONS.keys()),
+                        "screenshots": True,
                     },
                 }
             )
@@ -704,6 +824,13 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/runtime/info":
             self._write_json(self._get_runtime_info())
+            return
+
+        if parsed.path == "/gui/screenshot":
+            query = parse_qs(parsed.query)
+            include_image = str(query.get("include_image", ["false"])[0]).lower() in ("1", "true", "yes")
+            result, status = self._capture_screenshot(include_image=include_image)
+            self._write_json(result, status=status)
             return
 
         if parsed.path == "/files/read":
@@ -791,6 +918,19 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
+
+        if not self._require_token_auth():
+            return
+
+        if parsed.path == "/gui/action":
+            payload, error = self._read_json_body()
+            if error:
+                self._write_json({"error": error}, status=400)
+                return
+
+            result, status = self._gui_action((payload or {}).get("action"))
+            self._write_json(result, status=status)
+            return
 
         if parsed.path == "/log/marker":
             content_length = int(self.headers.get("Content-Length", "0"))
