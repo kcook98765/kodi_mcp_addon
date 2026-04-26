@@ -10,6 +10,7 @@ from zipfile import ZipFile
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVICE_DIR = ROOT / "packages" / "service.kodi_mcp"
+SETUP_DIR = ROOT / "packages" / "script.kodi_mcp_setup"
 
 
 class BridgeAddonStaticTests(unittest.TestCase):
@@ -27,6 +28,21 @@ class BridgeAddonStaticTests(unittest.TestCase):
         ]
         self.assertEqual(len(service_extensions), 1)
         self.assertEqual(service_extensions[0].attrib["library"], "service.py")
+
+    def test_setup_manifest_metadata(self):
+        tree = ET.parse(SETUP_DIR / "addon.xml")
+        addon = tree.getroot()
+
+        self.assertEqual(addon.attrib["id"], "script.kodi_mcp_setup")
+        self.assertEqual(addon.attrib["version"], "0.1.0")
+
+        script_extensions = [
+            ext
+            for ext in addon.findall("extension")
+            if ext.attrib.get("point") == "xbmc.python.script"
+        ]
+        self.assertEqual(len(script_extensions), 1)
+        self.assertEqual(script_extensions[0].attrib["library"], "default.py")
 
     def test_settings_define_mcp_token(self):
         tree = ET.parse(SERVICE_DIR / "resources" / "settings.xml")
@@ -47,6 +63,21 @@ class BridgeAddonStaticTests(unittest.TestCase):
         self.assertEqual(control.attrib["format"], "string")
         self.assertEqual(constraints.find("allowempty").text, "true")
 
+    def test_setup_settings_define_mcp_server_url(self):
+        tree = ET.parse(SETUP_DIR / "resources" / "settings.xml")
+        settings = {
+            node.attrib.get("id"): node
+            for node in tree.getroot().iter("setting")
+        }
+        self.assertIn("mcp_server_url", settings)
+        control = settings["mcp_server_url"].find("control")
+        constraints = settings["mcp_server_url"].find("constraints")
+        self.assertIsNotNone(control)
+        self.assertIsNotNone(constraints)
+        self.assertEqual(control.attrib["type"], "edit")
+        self.assertEqual(control.attrib["format"], "string")
+        self.assertEqual(constraints.find("allowempty").text, "true")
+
     def test_bridge_code_has_milestone_a_routes(self):
         source = (SERVICE_DIR / "http_bridge.py").read_text(encoding="utf-8")
 
@@ -60,7 +91,9 @@ class BridgeAddonStaticTests(unittest.TestCase):
         for path in (
             SERVICE_DIR / "http_bridge.py",
             SERVICE_DIR / "service.py",
+            SETUP_DIR / "default.py",
             ROOT / "packages" / "script.kodi_mcp_test" / "default.py",
+            ROOT / "scripts" / "build_addon.py",
             ROOT / "scripts" / "build_service_addon.py",
         ):
             with self.subTest(path=path):
@@ -88,6 +121,30 @@ class BridgeAddonStaticTests(unittest.TestCase):
             self.assertIn("service.kodi_mcp/addon.xml", names)
             self.assertIn("service.kodi_mcp/http_bridge.py", names)
             self.assertIn("service.kodi_mcp/resources/settings.xml", names)
+
+    def test_build_setup_addon_zip_contains_addon_root(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "build_addon.py"),
+                    "script.kodi_mcp_setup",
+                    "--output-dir",
+                    tmp_dir,
+                ],
+                check=True,
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+            )
+
+            zip_path = Path(tmp_dir) / "script.kodi_mcp_setup-0.1.0.zip"
+            self.assertTrue(zip_path.exists())
+            with ZipFile(zip_path) as zf:
+                names = set(zf.namelist())
+            self.assertIn("script.kodi_mcp_setup/addon.xml", names)
+            self.assertIn("script.kodi_mcp_setup/default.py", names)
+            self.assertIn("script.kodi_mcp_setup/resources/settings.xml", names)
 
 
 if __name__ == "__main__":

@@ -5,8 +5,26 @@ Kodi-resident bridge addon packages for the Kodi MCP system.
 ## Ownership
 
 - `packages/service.kodi_mcp` owns the Kodi HTTP bridge addon.
+- `packages/script.kodi_mcp_setup` owns the user-facing setup helper.
 - `packages/repository.kodi_mcp_dev` owns the private development repository addon.
 - `packages/script.kodi_mcp_test` owns a small executable addon used for workflow checks.
+
+## User Onboarding
+
+Initial MCP server repository setup is handled inside Kodi by `script.kodi_mcp_setup`; agents are not required for this flow.
+
+User flow:
+
+1. Install and enable `service.kodi_mcp`.
+2. Start the MCP server.
+3. Launch **Kodi MCP Setup**.
+4. Confirm or enter the MCP server URL.
+5. Choose **Prepare repository add-on zip**. The setup addon saves it to `~/Downloads/Kodi MCP` when that folder is available, otherwise to the setup addon's profile data.
+6. Choose **Open Install from zip file**.
+7. In Kodi's Add-on browser, use **Install from zip file** and select the prepared `repository.kodi-mcp-latest.zip`.
+8. Confirm Kodi's required security/install prompts.
+
+After `repository.kodi-mcp` is installed, first installs of target addons use Kodi's normal **Install from repository → Kodi MCP Repository** flow, and later updates can be handled by the MCP server workflow.
 
 ## Bridge Surface
 
@@ -31,8 +49,9 @@ From this repo:
 
 ```bash
 python3 -m unittest discover -s tests
-python3 -m py_compile packages/service.kodi_mcp/http_bridge.py packages/service.kodi_mcp/service.py packages/script.kodi_mcp_test/default.py scripts/build_service_addon.py
+python3 -m py_compile packages/service.kodi_mcp/http_bridge.py packages/service.kodi_mcp/service.py packages/script.kodi_mcp_setup/default.py packages/script.kodi_mcp_test/default.py scripts/build_addon.py scripts/build_service_addon.py
 python3 scripts/build_service_addon.py
+python3 scripts/build_addon.py script.kodi_mcp_setup
 ```
 
 No GitHub push should happen until the local Kodi workflow has been smoke-tested and the operator explicitly asks to push.

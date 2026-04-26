@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<addon id="script.kodi_mcp_setup" name="Kodi MCP Setup" version="0.1.0" provider-name="kodi_mcp">
+    <requires>
+        <import addon="xbmc.python" version="3.0.0"/>
+    </requires>
+    <extension point="xbmc.python.script" library="default.py"/>
+    <extension point="xbmc.addon.metadata">
+        <summary>Kodi MCP setup</summary>
+        <description>User-facing setup helper for connecting to the Kodi MCP server and preparing the Kodi MCP repository add-on</description>
+        <platform>all</platform>
+        <license>MIT</license>
+    </extension>
+</addon>

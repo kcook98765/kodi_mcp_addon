@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<settings version="1">
+    <section id="script.kodi_mcp_setup">
+        <category id="kodi_mcp_setup" label="Kodi MCP Setup">
+            <group id="1">
+                <setting id="mcp_server_url" type="string" label="MCP server URL" help="">
+                    <level>0</level>
+                    <default></default>
+                    <constraints>
+                        <allowempty>true</allowempty>
+                    </constraints>
+                    <control type="edit" format="string">
+                        <heading>MCP server URL</heading>
+                    </control>
+                </setting>
+            </group>
+        </category>
+    </section>
+</settings>

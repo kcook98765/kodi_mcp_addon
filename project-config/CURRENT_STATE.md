@@ -14,8 +14,21 @@ This repo owns the Kodi-resident addon packages for the Kodi MCP stack.
 ## Packages
 
 - `packages/service.kodi_mcp`: Kodi HTTP bridge service addon.
+- `packages/script.kodi_mcp_setup`: user-facing setup helper for initial MCP server repository onboarding.
 - `packages/repository.kodi_mcp_dev`: private development repository addon.
 - `packages/script.kodi_mcp_test`: small test addon for deployment/update checks.
+
+## User-Facing Setup Addon
+
+`script.kodi_mcp_setup` is the preferred first-time user flow for connecting Kodi to the MCP server repository without involving an agent.
+
+Current setup behavior:
+
+- Reads the MCP server URL from setup addon settings or from the bridge `/mcp/state` registration when available.
+- Checks server `/health` and `/repo/info`.
+- Downloads the reported `repository_addon_zip` as `repository.kodi-mcp-latest.zip` under `~/Downloads/Kodi MCP` when available, with setup addon profile data as a fallback.
+- Opens Kodi's Add-on browser so the user can choose **Install from zip file** and select the prepared repository add-on zip.
+- Leaves Kodi security/install prompts under user control.
 
 ## Current Bridge Capabilities
 
@@ -48,8 +61,9 @@ Run from the repo root:
 
 ```bash
 python3 -m unittest discover -s tests
-python3 -m py_compile packages/service.kodi_mcp/http_bridge.py packages/service.kodi_mcp/service.py packages/script.kodi_mcp_test/default.py scripts/build_service_addon.py
+python3 -m py_compile packages/service.kodi_mcp/http_bridge.py packages/service.kodi_mcp/service.py packages/script.kodi_mcp_setup/default.py packages/script.kodi_mcp_test/default.py scripts/build_addon.py scripts/build_service_addon.py
 python3 scripts/build_service_addon.py
+python3 scripts/build_addon.py script.kodi_mcp_setup
 ```
 
 For live validation, use the Kodi agent stack's existing host-control workflow after packaging/installing this addon in Kodi.
@@ -77,5 +91,6 @@ Completed after installing the freshly built `service.kodi_mcp-0.2.16.zip` into 
 ## Future TODO
 
 - Keep addon version, docs, and smoke-test notes aligned for each bridge behavior change.
+- Consider adding a custom setup window later if Kodi's native Add-on browser still requires too many clicks.
 - Confirm repository URLs in `repository.kodi_mcp_dev` match the target server host before release.
 - Keep local env files, zips, logs, caches, and backup files out of Git.
