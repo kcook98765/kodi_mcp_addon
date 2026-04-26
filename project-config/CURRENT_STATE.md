@@ -9,7 +9,7 @@ This repo owns the Kodi-resident addon packages for the Kodi MCP stack.
 - Repo path: `/srv/openclaw-projects/kodi_mcp_addon/workspace/project`
 - Git remote: `git@github.com:kcook98765/kodi_mcp_addon.git`
 - Work branch for this review: `review/kodi-mcp-addon-hygiene-20260425`
-- Do not push until explicitly requested.
+- Push only after local review and verification. The operator requested pushing these review branches after README review.
 
 ## Packages
 
@@ -71,12 +71,15 @@ For live validation, use the Kodi agent stack's existing host-control workflow a
 
 ## Live Smoke Result
 
-Completed after installing the freshly built `service.kodi_mcp-0.2.16.zip` into local Kodi and restarting Kodi:
+Completed after installing the freshly built `service.kodi_mcp-0.2.17.zip` into local Kodi and restarting Kodi:
 
-- `/health`: ok
-- `/status`: reports `service.kodi_mcp` `0.2.16`
-- `/capabilities` and `/control/capabilities`: ok
-- `/mcp/state`: ok, includes registration, staged repo zip state, `dev_setup_available=true`, and install hint
+- `/health`: ok and remains public.
+- `/status`: ok.
+- Kodi JSON-RPC reports `service.kodi_mcp` installed/enabled at version `0.2.17`.
+- `/capabilities` and `/control/capabilities`: ok and remain public.
+- `/mcp/state`: ok, includes registration, staged repo zip state, `dev_setup_available=true`, and install hint.
+- Protected GUI/control endpoints return `401 Unauthorized` without `X-Kodi-MCP-Token` when the token setting is configured.
+- MCP `kodi_gui_screenshot` succeeds through the authenticated server path, stores the PNG on the MCP server, and serves it from `/screenshots/<id>.png`.
 - MCP managed-addon smoke with `script.kodi_mcp_test`:
   - package/upload/publish succeeded
   - repo staging via `/repo/stage` succeeded
@@ -88,7 +91,7 @@ Completed after installing the freshly built `service.kodi_mcp-0.2.16.zip` into 
   - `POST /gui/action` with `down` and `back`: ok
   - `GET /gui/screenshot`: ok, returned a non-empty PNG under addon profile screenshots
 - Fixed binary reads for screenshots and staged repo zip rehydration; Kodi's `xbmcvfs.File(..., "rb")` attempted UTF-8 decoding for binary data.
-- Source now builds `service.kodi_mcp-0.2.17.zip` with stricter token enforcement for non-health/status/capabilities endpoints; install/live smoke this package before pushing release notes.
+- Source now builds `service.kodi_mcp-0.2.17.zip` with stricter token enforcement for non-health/status/capabilities endpoints, and that package has been installed/live-smoked locally.
 
 ## Future TODO
 
