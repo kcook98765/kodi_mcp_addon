@@ -146,6 +146,9 @@ class BridgeHandlerTests(unittest.TestCase):
         self.assertEqual(state_status, 200)
         self.assertTrue(state_envelope["result"]["derived"]["dev_setup_available"])
         self.assertTrue(state_envelope["result"]["install_hint"]["path"].endswith("dev-repo.zip"))
+        self.assertEqual(state_envelope["result"]["install_hint"]["action"], "Kodi UI: Add-ons > Install from repository")
+        self.assertEqual(state_envelope["result"]["install_hint"]["repository_addon_id"], "repository.kodi-mcp")
+        self.assertIn("not an installable Kodi add-on zip", state_envelope["result"]["install_hint"]["note"])
 
     def test_repo_stage_state_rehydrates_existing_zip(self):
         body = b"PK\x03\x04data"

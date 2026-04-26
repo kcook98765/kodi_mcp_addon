@@ -22,6 +22,8 @@ MAX_FILE_READ_BYTES = 16384
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024
 MAX_REPO_STAGE_BYTES = 25 * 1024 * 1024
 DEFAULT_REPO_ID = "dev-repo"
+DEFAULT_REPOSITORY_ADDON_ID = "repository.kodi-mcp"
+DEFAULT_REPOSITORY_NAME = "Kodi MCP Repository"
 GUI_ACTIONS = {
     "up": "Input.Up",
     "down": "Input.Down",
@@ -565,9 +567,16 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
         install_hint = None
         if isinstance(repo_zip, dict) and repo_zip.get("saved_path"):
             install_hint = {
-                "action": "Kodi UI: Add-ons > Install from zip file",
+                "action": "Kodi UI: Add-ons > Install from repository",
+                "repository_addon_id": DEFAULT_REPOSITORY_ADDON_ID,
+                "repository_name": DEFAULT_REPOSITORY_NAME,
                 "path": repo_zip.get("saved_path"),
-                "note": "Select the staged repository add-on zip, then retry the managed addon workflow.",
+                "staged_repo_archive_path": repo_zip.get("saved_path"),
+                "note": (
+                    "The staged dev-repo.zip is repository content for the bridge/server refresh loop, "
+                    "not an installable Kodi add-on zip. If the repository add-on is missing, install "
+                    "repository.kodi-mcp once, then use Install from repository for target add-ons."
+                ),
             }
         derived = {
             "registration_present": registration_present,

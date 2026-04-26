@@ -37,10 +37,15 @@ class BridgeAddonStaticTests(unittest.TestCase):
         self.assertIn("mcp_token", settings)
         control = settings["mcp_token"].find("control")
         default = settings["mcp_token"].find("default")
+        constraints = settings["mcp_token"].find("constraints")
+        level = settings["mcp_token"].find("level")
         self.assertIsNotNone(default)
         self.assertIsNotNone(control)
+        self.assertIsNotNone(constraints)
+        self.assertEqual(level.text, "0")
         self.assertEqual(control.attrib["type"], "edit")
         self.assertEqual(control.attrib["format"], "string")
+        self.assertEqual(constraints.find("allowempty").text, "true")
 
     def test_bridge_code_has_milestone_a_routes(self):
         source = (SERVICE_DIR / "http_bridge.py").read_text(encoding="utf-8")

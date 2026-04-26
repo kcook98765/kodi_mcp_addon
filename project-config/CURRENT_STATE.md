@@ -37,7 +37,7 @@ Token behavior:
 Repo staging behavior:
 
 - `/repo/stage` accepts a zip upload, validates optional `X-Content-SHA256`, and stores the zip under the addon's profile data directory.
-- `/mcp/state` reports whether registration is present, whether registration is stale, whether a staged repo zip exists, whether developer setup is available, and an install hint for the staged zip.
+- `/mcp/state` reports whether registration is present, whether registration is stale, whether a staged repo zip exists, whether developer setup is available, and an install hint that points to **Install from repository**. The staged `dev-repo.zip` is repository content, not an installable Kodi add-on zip.
 - Staged repo zip metadata is rehydrated after service restart when the default staged zip still exists.
 - GUI actions support `up`, `down`, `left`, `right`, `select`, `back`, `home`, `context`, and `info`.
 - Screenshot capture writes PNG files under addon profile data and can return base64 PNG data for agent vision use.
@@ -65,9 +65,10 @@ Completed after installing the freshly built `service.kodi_mcp-0.2.16.zip` into 
 - MCP managed-addon smoke with `script.kodi_mcp_test`:
   - package/upload/publish succeeded
   - repo staging via `/repo/stage` succeeded
-  - apply returned the expected first-install gate because `script.kodi_mcp_test` is not installed yet
-- Attempted `InstallAddon(script.kodi_mcp_test)` through the bridge; Kodi accepted the builtin request but the addon remained uninstalled after polling, confirming the first install still requires Kodi UI.
-- Fixed `mcp_token` settings metadata so Kodi no longer logs missing `<control>` warnings for the setting.
+  - initial first-install gate was cleared through Kodi UI
+  - post-initial managed apply updated `script.kodi_mcp_test` to repo version `0.0.9`
+- Attempted `InstallAddon(script.kodi_mcp_test)` through the bridge before first install; Kodi accepted the builtin request but the addon remained uninstalled after polling, confirming the first install still requires Kodi UI.
+- `mcp_token` settings metadata now includes explicit `level`, `allowempty`, and edit-control heading metadata to avoid Kodi default-value warnings.
 - Added and live-smoked GUI bridge helpers:
   - `POST /gui/action` with `down` and `back`: ok
   - `GET /gui/screenshot`: ok, returned a non-empty PNG under addon profile screenshots
@@ -75,7 +76,6 @@ Completed after installing the freshly built `service.kodi_mcp-0.2.16.zip` into 
 
 ## Future TODO
 
-- Complete the Kodi UI first install for `script.kodi_mcp_test`, then rerun the managed apply workflow to verify fully automated updates after first install.
 - Keep addon version, docs, and smoke-test notes aligned for each bridge behavior change.
 - Confirm repository URLs in `repository.kodi_mcp_dev` match the target server host before release.
 - Keep local env files, zips, logs, caches, and backup files out of Git.
