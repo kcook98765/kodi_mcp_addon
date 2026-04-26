@@ -20,6 +20,7 @@ BRIDGE_START_TIME = time.time()
 MAX_FILE_READ_BYTES = 16384
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024
 MAX_REPO_STAGE_BYTES = 25 * 1024 * 1024
+DEFAULT_REPO_ID = "dev-repo"
 MCP_STATE_LOCK = threading.Lock()
 MCP_STATE = {
     "registration": None,
@@ -118,6 +119,48 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
 
     def _get_repo_staging_dir(self):
         return xbmcvfs.translatePath("special://profile/addon_data/service.kodi_mcp/repo_stage")
+
+    def _get_repo_stage_path(self, repo_id):
+        repo_id = str(repo_id or "").strip() or DEFAULT_REPO_ID
+        return os.path.join(self._get_repo_staging_dir(), "%s.zip" % repo_id)
+
+    def _get_capabilities(self):
+        return {
+            "service": "service.kodi_mcp",
+            "bridge_api_version": 1,
+            "endpoints": [
+                "/health",
+                "/status",
+                "/runtime/info",
+                "/capabilities",
+                "/control/capabilities",
+                "/mcp/register",
+                "/mcp/state",
+                "/repo/stage",
+                "/addon/info",
+                "/addon/ensure-enabled",
+                "/addon/execute",
+                "/addon/version-check",
+                "/log/tail",
+                "/log/markers",
+                "/log/marker",
+                "/files/read",
+                "/debug/addon-db",
+                "/debug/ping",
+            ],
+            "features": {
+                "token_auth": True,
+                "mcp_registration": True,
+                "repo_zip_staging": True,
+                "repo_zip_sha256": True,
+                "repo_zip_state_rehydrate": True,
+            },
+            "limits": {
+                "max_file_read_bytes": MAX_FILE_READ_BYTES,
+                "max_upload_bytes": MAX_UPLOAD_BYTES,
+                "max_repo_stage_bytes": MAX_REPO_STAGE_BYTES,
+            },
+        }
 
     def _get_runtime_info(self):
         addon = self._get_addon()
@@ -288,7 +331,7 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
             handle.close()
 
     def _repo_stage(self, repo_id, mode, body):
-        repo_id = str(repo_id or "").strip() or "dev-repo"
+        repo_id = str(repo_id or "").strip() or DEFAULT_REPO_ID
         mode = str(mode or "").strip() or "overwrite"
         if mode != "overwrite":
             return self._standard_envelope(ok=False, error="only overwrite mode is supported"), 400
@@ -304,9 +347,8 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
         if expected_sha and expected_sha != actual_sha:
             return self._standard_envelope(ok=False, error="sha256 mismatch"), 400
 
-        staging_dir = self._get_repo_staging_dir()
         filename = "%s.zip" % repo_id
-        saved_path = os.path.join(staging_dir, filename)
+        saved_path = self._get_repo_stage_path(repo_id)
         self._write_binary_file(saved_path, body)
 
         repo_zip = {
@@ -323,6 +365,40 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
             MCP_STATE["repo_zip"] = repo_zip
 
         return self._standard_envelope(result=repo_zip), 200
+
+    def _load_repo_zip_state(self):
+        """Rehydrate staged repo zip metadata after service restart when possible."""
+        with MCP_STATE_LOCK:
+            existing = MCP_STATE.get("repo_zip")
+            if isinstance(existing, dict) and existing.get("saved_path") and xbmcvfs.exists(existing.get("saved_path")):
+                return existing
+
+        saved_path = self._get_repo_stage_path(DEFAULT_REPO_ID)
+        if not xbmcvfs.exists(saved_path):
+            return None
+
+        handle = xbmcvfs.File(saved_path, "rb")
+        try:
+            body = handle.read()
+        finally:
+            handle.close()
+        if isinstance(body, str):
+            body = body.encode("utf-8")
+
+        repo_zip = {
+            "repo_id": DEFAULT_REPO_ID,
+            "mode": "overwrite",
+            "repo_version": None,
+            "filename": "%s.zip" % DEFAULT_REPO_ID,
+            "saved_path": saved_path,
+            "size_bytes": len(body or b""),
+            "sha256": hashlib.sha256(body or b"").hexdigest(),
+            "staged_at": None,
+            "rehydrated": True,
+        }
+        with MCP_STATE_LOCK:
+            MCP_STATE["repo_zip"] = repo_zip
+        return repo_zip
 
     def _is_allowed_path(self, requested_path):
         normalized = os.path.normcase(os.path.abspath(requested_path))
@@ -372,6 +448,8 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
         with MCP_STATE_LOCK:
             registration = MCP_STATE.get("registration")
             repo_zip = MCP_STATE.get("repo_zip")
+        if not isinstance(repo_zip, dict):
+            repo_zip = self._load_repo_zip_state()
 
         registration_present = isinstance(registration, dict)
         registration_stale = True
@@ -389,13 +467,20 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
             "registration": registration,
             "repo_zip": repo_zip,
         }
+        install_hint = None
+        if isinstance(repo_zip, dict) and repo_zip.get("saved_path"):
+            install_hint = {
+                "action": "Kodi UI: Add-ons > Install from zip file",
+                "path": repo_zip.get("saved_path"),
+                "note": "Select the staged repository add-on zip, then retry the managed addon workflow.",
+            }
         derived = {
             "registration_present": registration_present,
             "registration_stale": registration_stale,
             "repo_zip_file_exists": repo_zip_file_exists,
             "dev_setup_available": bool(registration_present and not registration_stale and repo_zip_file_exists),
         }
-        return self._standard_envelope(result={"state": state, "derived": derived}), 200
+        return self._standard_envelope(result={"state": state, "derived": derived, "install_hint": install_hint}), 200
 
     def _read_text_file(self, requested_path):
         if not requested_path:
@@ -509,6 +594,10 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
                 return
             result, status = self._mcp_state()
             self._write_json(result, status=status)
+            return
+
+        if parsed.path in ("/capabilities", "/control/capabilities"):
+            self._write_json(self._get_capabilities())
             return
 
         if parsed.path == "/health":

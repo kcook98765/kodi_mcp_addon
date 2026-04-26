@@ -1,7 +1,11 @@
 import ast
+import subprocess
+import sys
+import tempfile
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from zipfile import ZipFile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -46,9 +50,33 @@ class BridgeAddonStaticTests(unittest.TestCase):
             SERVICE_DIR / "http_bridge.py",
             SERVICE_DIR / "service.py",
             ROOT / "packages" / "script.kodi_mcp_test" / "default.py",
+            ROOT / "scripts" / "build_service_addon.py",
         ):
             with self.subTest(path=path):
                 ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+
+    def test_build_service_addon_zip_contains_addon_root(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "build_service_addon.py"),
+                    "--output-dir",
+                    tmp_dir,
+                ],
+                check=True,
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+            )
+
+            zip_path = Path(tmp_dir) / "service.kodi_mcp-0.2.16.zip"
+            self.assertTrue(zip_path.exists())
+            with ZipFile(zip_path) as zf:
+                names = set(zf.namelist())
+            self.assertIn("service.kodi_mcp/addon.xml", names)
+            self.assertIn("service.kodi_mcp/http_bridge.py", names)
+            self.assertIn("service.kodi_mcp/resources/settings.xml", names)
 
 
 if __name__ == "__main__":

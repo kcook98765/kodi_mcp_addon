@@ -24,6 +24,8 @@ This repo owns the Kodi-resident addon packages for the Kodi MCP stack.
 - `POST /mcp/register`
 - `GET /mcp/state`
 - `POST /repo/stage`
+- `GET /capabilities`
+- `GET /control/capabilities`
 
 Token behavior:
 
@@ -33,7 +35,8 @@ Token behavior:
 Repo staging behavior:
 
 - `/repo/stage` accepts a zip upload, validates optional `X-Content-SHA256`, and stores the zip under the addon's profile data directory.
-- `/mcp/state` reports whether registration is present, whether registration is stale, whether a staged repo zip exists, and whether developer setup is available.
+- `/mcp/state` reports whether registration is present, whether registration is stale, whether a staged repo zip exists, whether developer setup is available, and an install hint for the staged zip.
+- Staged repo zip metadata is rehydrated after service restart when the default staged zip still exists.
 
 ## Verification
 
@@ -41,14 +44,28 @@ Run from the repo root:
 
 ```bash
 python3 -m unittest discover -s tests
-python3 -m py_compile packages/service.kodi_mcp/http_bridge.py packages/service.kodi_mcp/service.py packages/script.kodi_mcp_test/default.py
+python3 -m py_compile packages/service.kodi_mcp/http_bridge.py packages/service.kodi_mcp/service.py packages/script.kodi_mcp_test/default.py scripts/build_service_addon.py
+python3 scripts/build_service_addon.py
 ```
 
 For live validation, use the Kodi agent stack's existing host-control workflow after packaging/installing this addon in Kodi.
 
+## Live Smoke Result
+
+Completed after installing the freshly built `service.kodi_mcp-0.2.16.zip` into local Kodi and restarting Kodi:
+
+- `/health`: ok
+- `/status`: reports `service.kodi_mcp` `0.2.16`
+- `/capabilities` and `/control/capabilities`: ok
+- `/mcp/state`: ok, includes registration, staged repo zip state, `dev_setup_available=true`, and install hint
+- MCP managed-addon smoke with `script.kodi_mcp_test`:
+  - package/upload/publish succeeded
+  - repo staging via `/repo/stage` succeeded
+  - apply returned the expected first-install gate because `script.kodi_mcp_test` is not installed yet
+
 ## Future TODO
 
-- Smoke-test `service.kodi_mcp` `0.2.16` in Kodi with the MCP server's managed-addon flow.
+- Complete the Kodi UI first install for `script.kodi_mcp_test`, then rerun the managed apply workflow to verify fully automated updates after first install.
 - Keep addon version, docs, and smoke-test notes aligned for each bridge behavior change.
 - Confirm repository URLs in `repository.kodi_mcp_dev` match the target server host before release.
 - Keep local env files, zips, logs, caches, and backup files out of Git.
