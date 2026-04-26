@@ -38,7 +38,7 @@ After `repository.kodi-mcp` is installed, first installs of target addons use Ko
 - `/files/read`, `/debug/addon-db`, `/debug/ping`
 - `/mcp/register`, `/mcp/state`, `/repo/stage`
 
-The `/mcp/*` and `/repo/stage` endpoints use the standard bridge envelope expected by `kodi_mcp_server`. If the Kodi addon setting `mcp_token` is configured, callers must send the same value in the `X-Kodi-MCP-Token` header.
+The `/mcp/*` and `/repo/stage` endpoints use the standard bridge envelope expected by `kodi_mcp_server`. If the Kodi addon setting `mcp_token` is configured, all non-health/status/capabilities endpoints require the same value in the `X-Kodi-MCP-Token` header.
 `/mcp/state` includes staged repo archive state when a repo zip has been staged. The staged `dev-repo.zip` is repository content for the server/bridge refresh loop, not an installable Kodi add-on zip; first install of target add-ons should use **Add-ons → Install from repository → Kodi MCP Repository** after `repository.kodi-mcp` is installed once.
 `/gui/action` supports `up`, `down`, `left`, `right`, `select`, `back`, `home`, `context`, and `info`.
 `/gui/screenshot` captures a Kodi screenshot into the addon's profile data directory and can optionally include base64 PNG data.

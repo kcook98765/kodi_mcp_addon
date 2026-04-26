@@ -19,7 +19,7 @@ class BridgeAddonStaticTests(unittest.TestCase):
         addon = tree.getroot()
 
         self.assertEqual(addon.attrib["id"], "service.kodi_mcp")
-        self.assertEqual(addon.attrib["version"], "0.2.16")
+        self.assertEqual(addon.attrib["version"], "0.2.17")
 
         service_extensions = [
             ext
@@ -131,7 +131,7 @@ class BridgeAddonStaticTests(unittest.TestCase):
                 capture_output=True,
             )
 
-            zip_path = Path(tmp_dir) / "service.kodi_mcp-0.2.16.zip"
+            zip_path = Path(tmp_dir) / "service.kodi_mcp-0.2.17.zip"
             self.assertTrue(zip_path.exists())
             with ZipFile(zip_path) as zf:
                 names = set(zf.namelist())

@@ -33,7 +33,7 @@ Current setup behavior:
 
 ## Current Bridge Capabilities
 
-`service.kodi_mcp` version `0.2.16` exposes the basic bridge/debug endpoints plus the Milestone A endpoints expected by `kodi_mcp_server`:
+`service.kodi_mcp` version `0.2.17` exposes the basic bridge/debug endpoints plus the Milestone A endpoints expected by `kodi_mcp_server`:
 
 - `POST /mcp/register`
 - `GET /mcp/state`
@@ -46,7 +46,7 @@ Current setup behavior:
 Token behavior:
 
 - If the Kodi addon setting `mcp_token` is empty, bridge requests are accepted without a token.
-- If `mcp_token` is set, callers must send the same value in `X-Kodi-MCP-Token`.
+- If `mcp_token` is set, all non-health/status/capabilities endpoints require the same value in `X-Kodi-MCP-Token`, including GUI screenshots/actions, logs, addon execution, uploads, `/mcp/state`, and `/repo/stage`.
 
 Repo staging behavior:
 
@@ -88,6 +88,7 @@ Completed after installing the freshly built `service.kodi_mcp-0.2.16.zip` into 
   - `POST /gui/action` with `down` and `back`: ok
   - `GET /gui/screenshot`: ok, returned a non-empty PNG under addon profile screenshots
 - Fixed binary reads for screenshots and staged repo zip rehydration; Kodi's `xbmcvfs.File(..., "rb")` attempted UTF-8 decoding for binary data.
+- Source now builds `service.kodi_mcp-0.2.17.zip` with stricter token enforcement for non-health/status/capabilities endpoints; install/live smoke this package before pushing release notes.
 
 ## Future TODO
 

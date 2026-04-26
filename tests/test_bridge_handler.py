@@ -1,4 +1,6 @@
 import importlib.util
+import io
+import json
 import sys
 import tempfile
 import types
@@ -22,7 +24,7 @@ class _FakeAddon:
     def getAddonInfo(self, key):
         values = {
             "id": self.id,
-            "version": "0.2.16",
+            "version": "0.2.17",
             "path": "/tmp/fake-kodi/addons/service.kodi_mcp",
             "profile": "/tmp/fake-kodi/profile/addon_data/service.kodi_mcp",
         }
@@ -120,6 +122,48 @@ class BridgeHandlerTests(unittest.TestCase):
 
         self.handler.headers = {"X-Kodi-MCP-Token": "secret"}
         self.assertTrue(self.handler._authorize())
+
+    def test_public_get_paths_do_not_require_token(self):
+        public_paths = {"/health", "/status", "/runtime/info", "/capabilities", "/control/capabilities"}
+
+        for path in public_paths:
+            self.assertTrue(self.handler._is_public_get_path(path))
+
+        self.assertFalse(self.handler._is_public_get_path("/gui/screenshot"))
+        self.assertFalse(self.handler._is_public_get_path("/log/tail"))
+
+    def test_protected_get_paths_reject_missing_token(self):
+        _FakeAddon.settings = {"mcp_token": "secret"}
+        writes = []
+
+        self.handler.path = "/gui/screenshot"
+        self.handler.headers = {}
+        self.handler.send_response = lambda status: writes.append(("status", status))
+        self.handler.send_header = lambda name, value: writes.append(("header", name, value))
+        self.handler.end_headers = lambda: writes.append(("end",))
+        self.handler.wfile = io.BytesIO()
+
+        self.handler.do_GET()
+
+        self.assertIn(("status", 401), writes)
+        self.assertEqual(json.loads(self.handler.wfile.getvalue().decode("utf-8")), {"error": "unauthorized"})
+
+    def test_protected_post_paths_reject_missing_token(self):
+        _FakeAddon.settings = {"mcp_token": "secret"}
+        writes = []
+
+        self.handler.path = "/gui/action"
+        self.handler.headers = {"Content-Length": "0"}
+        self.handler.rfile = io.BytesIO(b"")
+        self.handler.send_response = lambda status: writes.append(("status", status))
+        self.handler.send_header = lambda name, value: writes.append(("header", name, value))
+        self.handler.end_headers = lambda: writes.append(("end",))
+        self.handler.wfile = io.BytesIO()
+
+        self.handler.do_POST()
+
+        self.assertIn(("status", 401), writes)
+        self.assertEqual(json.loads(self.handler.wfile.getvalue().decode("utf-8")), {"error": "unauthorized"})
 
     def test_repo_stage_rejects_sha_mismatch(self):
         self.handler.headers = {"X-Content-SHA256": "0" * 64}

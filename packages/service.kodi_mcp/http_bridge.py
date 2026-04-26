@@ -82,6 +82,9 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
         self._write_json({"error": "unauthorized"}, status=401)
         return True
 
+    def _is_public_get_path(self, path):
+        return path in ("/health", "/status", "/runtime/info", "/capabilities", "/control/capabilities")
+
     def _read_json_body(self):
         content_length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(content_length) if content_length > 0 else b"{}"
@@ -693,9 +696,10 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
 
+        if not self._is_public_get_path(parsed.path) and self._write_auth_error_if_needed():
+            return
+
         if parsed.path == "/mcp/state":
-            if self._write_auth_error_if_needed():
-                return
             result, status = self._mcp_state()
             self._write_json(result, status=status)
             return
@@ -824,9 +828,10 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
 
+        if self._write_auth_error_if_needed():
+            return
+
         if parsed.path == "/mcp/register":
-            if self._write_auth_error_if_needed():
-                return
             payload, error = self._read_json_body()
             if error:
                 self._write_json(self._standard_envelope(ok=False, error=error), status=400)
@@ -836,8 +841,6 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/repo/stage":
-            if self._write_auth_error_if_needed():
-                return
             query = parse_qs(parsed.query)
             repo_id = query.get("repo_id", ["dev-repo"])[0]
             mode = query.get("mode", ["overwrite"])[0]
