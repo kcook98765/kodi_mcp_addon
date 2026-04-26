@@ -1,16 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <settings version="1">
     <section id="script.kodi_mcp_setup">
-        <category id="kodi_mcp_setup" label="Kodi MCP Setup">
+        <category id="kodi_mcp_setup" label="30000">
             <group id="1">
-                <setting id="mcp_server_url" type="string" label="MCP server URL" help="">
+                <setting id="mcp_server_url" type="string" label="30001" help="30002">
                     <level>0</level>
                     <default></default>
                     <constraints>
                         <allowempty>true</allowempty>
                     </constraints>
                     <control type="edit" format="string">
-                        <heading>MCP server URL</heading>
+                        <heading>30001</heading>
                     </control>
                 </setting>
             </group>

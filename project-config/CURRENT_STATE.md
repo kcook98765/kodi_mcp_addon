@@ -29,6 +29,7 @@ Current setup behavior:
 - Downloads the reported `repository_addon_zip` as `repository.kodi-mcp-latest.zip` under `~/Downloads/Kodi MCP` when available, with setup addon profile data as a fallback.
 - Opens Kodi's Add-on browser so the user can choose **Install from zip file** and select the prepared repository add-on zip.
 - Leaves Kodi security/install prompts under user control.
+- Live Kodi install testing verified `script.kodi_mcp_setup` version `0.1.1` can be installed/enabled from zip, prepare the repository zip, open the native install-from-zip browser, and show labeled setup settings.
 
 ## Current Bridge Capabilities
 

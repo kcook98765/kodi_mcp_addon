@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<addon id="script.kodi_mcp_setup" name="Kodi MCP Setup" version="0.1.0" provider-name="kodi_mcp">
+<addon id="script.kodi_mcp_setup" name="Kodi MCP Setup" version="0.1.1" provider-name="kodi_mcp">
     <requires>
         <import addon="xbmc.python" version="3.0.0"/>
     </requires>

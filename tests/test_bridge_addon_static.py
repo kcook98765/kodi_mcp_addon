@@ -34,7 +34,7 @@ class BridgeAddonStaticTests(unittest.TestCase):
         addon = tree.getroot()
 
         self.assertEqual(addon.attrib["id"], "script.kodi_mcp_setup")
-        self.assertEqual(addon.attrib["version"], "0.1.0")
+        self.assertEqual(addon.attrib["version"], "0.1.1")
 
         script_extensions = [
             ext
@@ -74,9 +74,26 @@ class BridgeAddonStaticTests(unittest.TestCase):
         constraints = settings["mcp_server_url"].find("constraints")
         self.assertIsNotNone(control)
         self.assertIsNotNone(constraints)
+        self.assertEqual(settings["mcp_server_url"].attrib["label"], "30001")
+        self.assertEqual(settings["mcp_server_url"].attrib["help"], "30002")
         self.assertEqual(control.attrib["type"], "edit")
         self.assertEqual(control.attrib["format"], "string")
+        self.assertEqual(control.findtext("heading"), "30001")
         self.assertEqual(constraints.find("allowempty").text, "true")
+
+    def test_setup_language_strings_define_settings_labels(self):
+        strings = (
+            SETUP_DIR
+            / "resources"
+            / "language"
+            / "resource.language.en_gb"
+            / "strings.po"
+        ).read_text(encoding="utf-8")
+        self.assertIn('msgctxt "#30000"', strings)
+        self.assertIn('msgid "Kodi MCP Setup"', strings)
+        self.assertIn('msgctxt "#30001"', strings)
+        self.assertIn('msgid "MCP server URL"', strings)
+        self.assertIn('msgctxt "#30002"', strings)
 
     def test_bridge_code_has_milestone_a_routes(self):
         source = (SERVICE_DIR / "http_bridge.py").read_text(encoding="utf-8")
@@ -138,7 +155,7 @@ class BridgeAddonStaticTests(unittest.TestCase):
                 capture_output=True,
             )
 
-            zip_path = Path(tmp_dir) / "script.kodi_mcp_setup-0.1.0.zip"
+            zip_path = Path(tmp_dir) / "script.kodi_mcp_setup-0.1.1.zip"
             self.assertTrue(zip_path.exists())
             with ZipFile(zip_path) as zf:
                 names = set(zf.namelist())
