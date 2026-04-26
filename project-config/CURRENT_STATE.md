@@ -26,6 +26,8 @@ This repo owns the Kodi-resident addon packages for the Kodi MCP stack.
 - `POST /repo/stage`
 - `GET /capabilities`
 - `GET /control/capabilities`
+- `POST /gui/action`
+- `GET /gui/screenshot`
 
 Token behavior:
 
@@ -37,6 +39,8 @@ Repo staging behavior:
 - `/repo/stage` accepts a zip upload, validates optional `X-Content-SHA256`, and stores the zip under the addon's profile data directory.
 - `/mcp/state` reports whether registration is present, whether registration is stale, whether a staged repo zip exists, whether developer setup is available, and an install hint for the staged zip.
 - Staged repo zip metadata is rehydrated after service restart when the default staged zip still exists.
+- GUI actions support `up`, `down`, `left`, `right`, `select`, `back`, `home`, `context`, and `info`.
+- Screenshot capture writes PNG files under addon profile data and can return base64 PNG data for agent vision use.
 
 ## Verification
 
@@ -64,6 +68,10 @@ Completed after installing the freshly built `service.kodi_mcp-0.2.16.zip` into 
   - apply returned the expected first-install gate because `script.kodi_mcp_test` is not installed yet
 - Attempted `InstallAddon(script.kodi_mcp_test)` through the bridge; Kodi accepted the builtin request but the addon remained uninstalled after polling, confirming the first install still requires Kodi UI.
 - Fixed `mcp_token` settings metadata so Kodi no longer logs missing `<control>` warnings for the setting.
+- Added and live-smoked GUI bridge helpers:
+  - `POST /gui/action` with `down` and `back`: ok
+  - `GET /gui/screenshot`: ok, returned a non-empty PNG under addon profile screenshots
+- Fixed binary reads for screenshots and staged repo zip rehydration; Kodi's `xbmcvfs.File(..., "rb")` attempted UTF-8 decoding for binary data.
 
 ## Future TODO
 

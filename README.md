@@ -14,6 +14,7 @@ Kodi-resident bridge addon packages for the Kodi MCP system.
 
 - `/health`, `/status`, `/runtime/info`
 - `/capabilities`, `/control/capabilities`
+- `/gui/action`, `/gui/screenshot`
 - `/addon/info`, `/addon/ensure-enabled`, `/addon/execute`, `/addon/version-check`
 - `/log/tail`, `/log/markers`, `/log/marker`
 - `/files/read`, `/debug/addon-db`, `/debug/ping`
@@ -21,6 +22,8 @@ Kodi-resident bridge addon packages for the Kodi MCP system.
 
 The `/mcp/*` and `/repo/stage` endpoints use the standard bridge envelope expected by `kodi_mcp_server`. If the Kodi addon setting `mcp_token` is configured, callers must send the same value in the `X-Kodi-MCP-Token` header.
 `/mcp/state` includes a staged repo zip install hint when a repo zip has been staged.
+`/gui/action` supports `up`, `down`, `left`, `right`, `select`, `back`, `home`, `context`, and `info`.
+`/gui/screenshot` captures a Kodi screenshot into the addon's profile data directory and can optionally include base64 PNG data.
 
 ## Local Verification
 

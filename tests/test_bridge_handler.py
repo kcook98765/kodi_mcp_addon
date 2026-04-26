@@ -75,13 +75,17 @@ class _FakeXbmcvfs(types.SimpleNamespace):
 
 
 def _load_bridge_module(tmp_path):
+    calls = []
+
     fake_xbmc = types.SimpleNamespace(
         LOGDEBUG=0,
         LOGINFO=1,
         log=lambda *args, **kwargs: None,
         getCondVisibility=lambda *args, **kwargs: False,
-        executebuiltin=lambda *args, **kwargs: None,
+        executebuiltin=lambda *args, **kwargs: calls.append(("builtin", args, kwargs)),
+        executeJSONRPC=lambda payload: '{"jsonrpc":"2.0","id":"test","result":"OK"}',
     )
+    fake_xbmc.calls = calls
     fake_xbmcaddon = types.SimpleNamespace(Addon=_FakeAddon)
     fake_xbmcvfs = _FakeXbmcvfs(tmp_path)
 
@@ -161,7 +165,48 @@ class BridgeHandlerTests(unittest.TestCase):
 
         self.assertIn("/mcp/register", capabilities["endpoints"])
         self.assertIn("/repo/stage", capabilities["endpoints"])
+        self.assertIn("/gui/action", capabilities["endpoints"])
+        self.assertIn("/gui/screenshot", capabilities["endpoints"])
         self.assertTrue(capabilities["features"]["repo_zip_staging"])
+        self.assertTrue(capabilities["features"]["screenshots"])
+
+    def test_gui_action_uses_jsonrpc_input_method(self):
+        result, status = self.handler._gui_action("down")
+
+        self.assertEqual(status, 200)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["method"], "Input.Down")
+
+    def test_gui_action_rejects_unknown_action(self):
+        result, status = self.handler._gui_action("launch")
+
+        self.assertEqual(status, 400)
+        self.assertEqual(result["error"], "unsupported gui action")
+        self.assertIn("select", result["allowed"])
+
+    def test_capture_screenshot_returns_pending_when_file_not_observed(self):
+        result, status = self.handler._capture_screenshot(include_image=False)
+
+        self.assertEqual(status, 202)
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["path"].endswith(".png"))
+
+    def test_capture_screenshot_returns_pending_for_empty_file(self):
+        original_builtin = sys.modules["xbmc"].executebuiltin
+
+        def _write_empty_screenshot(command, *args, **kwargs):
+            path = command.split("TakeScreenshot(", 1)[1].split(",", 1)[0]
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_bytes(b"")
+
+        sys.modules["xbmc"].executebuiltin = _write_empty_screenshot
+        try:
+            result, status = self.handler._capture_screenshot(include_image=False)
+        finally:
+            sys.modules["xbmc"].executebuiltin = original_builtin
+
+        self.assertEqual(status, 202)
+        self.assertEqual(result["error"], "screenshot file was created but remained empty")
 
 
 if __name__ == "__main__":

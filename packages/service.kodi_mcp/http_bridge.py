@@ -3,6 +3,7 @@
 
 import json
 import hashlib
+import base64
 import os
 import threading
 import time
@@ -21,6 +22,17 @@ MAX_FILE_READ_BYTES = 16384
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024
 MAX_REPO_STAGE_BYTES = 25 * 1024 * 1024
 DEFAULT_REPO_ID = "dev-repo"
+GUI_ACTIONS = {
+    "up": "Input.Up",
+    "down": "Input.Down",
+    "left": "Input.Left",
+    "right": "Input.Right",
+    "select": "Input.Select",
+    "back": "Input.Back",
+    "home": "Input.Home",
+    "context": "Input.ContextMenu",
+    "info": "Input.Info",
+}
 MCP_STATE_LOCK = threading.Lock()
 MCP_STATE = {
     "registration": None,
@@ -124,6 +136,9 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
         repo_id = str(repo_id or "").strip() or DEFAULT_REPO_ID
         return os.path.join(self._get_repo_staging_dir(), "%s.zip" % repo_id)
 
+    def _get_screenshot_dir(self):
+        return xbmcvfs.translatePath("special://profile/addon_data/service.kodi_mcp/screenshots")
+
     def _get_capabilities(self):
         return {
             "service": "service.kodi_mcp",
@@ -137,6 +152,8 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
                 "/mcp/register",
                 "/mcp/state",
                 "/repo/stage",
+                "/gui/action",
+                "/gui/screenshot",
                 "/addon/info",
                 "/addon/ensure-enabled",
                 "/addon/execute",
@@ -154,6 +171,8 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
                 "repo_zip_staging": True,
                 "repo_zip_sha256": True,
                 "repo_zip_state_rehydrate": True,
+                "gui_actions": sorted(GUI_ACTIONS.keys()),
+                "screenshots": True,
             },
             "limits": {
                 "max_file_read_bytes": MAX_FILE_READ_BYTES,
@@ -161,6 +180,87 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
                 "max_repo_stage_bytes": MAX_REPO_STAGE_BYTES,
             },
         }
+
+    def _jsonrpc(self, method, params=None):
+        payload = {
+            "jsonrpc": "2.0",
+            "id": str(uuid.uuid4()),
+            "method": method,
+        }
+        if params is not None:
+            payload["params"] = params
+        raw = xbmc.executeJSONRPC(json.dumps(payload))
+        try:
+            return json.loads(raw), None
+        except Exception as exc:
+            return None, "invalid json-rpc response: %s" % exc
+
+    def _gui_action(self, action):
+        action = str(action or "").strip().lower()
+        method = GUI_ACTIONS.get(action)
+        if not method:
+            return {
+                "error": "unsupported gui action",
+                "action": action,
+                "allowed": sorted(GUI_ACTIONS.keys()),
+            }, 400
+
+        response, error = self._jsonrpc(method)
+        if error:
+            return {"error": error, "action": action, "method": method}, 500
+        if isinstance(response, dict) and response.get("error"):
+            return {
+                "error": response.get("error"),
+                "action": action,
+                "method": method,
+                "jsonrpc": response,
+            }, 500
+        return {"ok": True, "action": action, "method": method, "jsonrpc": response}, 200
+
+    def _capture_screenshot(self, include_image=False):
+        screenshot_dir = self._get_screenshot_dir()
+        if not xbmcvfs.exists(screenshot_dir):
+            xbmcvfs.mkdirs(screenshot_dir)
+
+        filename = "screenshot-%s.png" % int(time.time() * 1000)
+        path = os.path.join(screenshot_dir, filename)
+        xbmc.executebuiltin("TakeScreenshot(%s,true)" % path, wait=True)
+
+        # Kodi writes screenshots asynchronously; poll briefly for non-empty output.
+        deadline = time.time() + 3
+        candidate = path
+        content = b""
+        while time.time() < deadline:
+            if xbmcvfs.exists(candidate):
+                content = self._read_binary_file(candidate)
+                if len(content or b"") > 0:
+                    break
+            time.sleep(0.2)
+
+        if not xbmcvfs.exists(candidate):
+            return {
+                "ok": False,
+                "path": candidate,
+                "error": "screenshot file not observed after request",
+            }, 202
+
+        if len(content or b"") == 0:
+            return {
+                "ok": False,
+                "path": candidate,
+                "error": "screenshot file was created but remained empty",
+            }, 202
+
+        result = {
+            "ok": True,
+            "path": candidate,
+            "filename": os.path.basename(candidate),
+            "size_bytes": len(content or b""),
+            "content_type": "image/png",
+        }
+        if include_image:
+            result["image_base64"] = base64.b64encode(content or b"").decode("ascii")
+        return result, 200
 
     def _get_runtime_info(self):
         addon = self._get_addon()
@@ -324,11 +424,12 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
         parent = os.path.dirname(path)
         if parent and not xbmcvfs.exists(parent):
             xbmcvfs.mkdirs(parent)
-        handle = xbmcvfs.File(path, "wb")
-        try:
+        with open(path, "wb") as handle:
             handle.write(body)
-        finally:
-            handle.close()
+
+    def _read_binary_file(self, path):
+        with open(path, "rb") as handle:
+            return handle.read()
 
     def _repo_stage(self, repo_id, mode, body):
         repo_id = str(repo_id or "").strip() or DEFAULT_REPO_ID
@@ -377,13 +478,7 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
         if not xbmcvfs.exists(saved_path):
             return None
 
-        handle = xbmcvfs.File(saved_path, "rb")
-        try:
-            body = handle.read()
-        finally:
-            handle.close()
-        if isinstance(body, str):
-            body = body.encode("utf-8")
+        body = self._read_binary_file(saved_path)
 
         repo_zip = {
             "repo_id": DEFAULT_REPO_ID,
@@ -600,6 +695,13 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
             self._write_json(self._get_capabilities())
             return
 
+        if parsed.path == "/gui/screenshot":
+            query = parse_qs(parsed.query)
+            include_image = str(query.get("include_image", ["false"])[0]).lower() in ("1", "true", "yes")
+            result, status = self._capture_screenshot(include_image=include_image)
+            self._write_json(result, status=status)
+            return
+
         if parsed.path == "/health":
             self._write_json(
                 {
@@ -733,6 +835,15 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
             content_length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(content_length) if content_length > 0 else b""
             result, status = self._repo_stage(repo_id, mode, body)
+            self._write_json(result, status=status)
+            return
+
+        if parsed.path == "/gui/action":
+            payload, error = self._read_json_body()
+            if error:
+                self._write_json({"error": error}, status=400)
+                return
+            result, status = self._gui_action((payload or {}).get("action"))
             self._write_json(result, status=status)
             return
 

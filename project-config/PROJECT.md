@@ -25,6 +25,6 @@ Key paths:
 - protocol examples: `project/protocol/`
 
 Current bridge contract:
-- `service.kodi_mcp` must provide `/health`, `/status`, `/runtime/info`, capability reporting, log helpers, addon helpers, and Milestone A endpoints `/mcp/register`, `/mcp/state`, and `/repo/stage`.
+- `service.kodi_mcp` must provide `/health`, `/status`, `/runtime/info`, capability reporting, GUI action/screenshot helpers, log helpers, addon helpers, and Milestone A endpoints `/mcp/register`, `/mcp/state`, and `/repo/stage`.
 - If `mcp_token` is configured in Kodi addon settings, server calls must include `X-Kodi-MCP-Token`.
 - The MCP server repo remains separate; this repo should only contain Kodi-side addon code and static tests for that code.
