@@ -62,6 +62,8 @@ Completed after installing the freshly built `service.kodi_mcp-0.2.16.zip` into 
   - package/upload/publish succeeded
   - repo staging via `/repo/stage` succeeded
   - apply returned the expected first-install gate because `script.kodi_mcp_test` is not installed yet
+- Attempted `InstallAddon(script.kodi_mcp_test)` through the bridge; Kodi accepted the builtin request but the addon remained uninstalled after polling, confirming the first install still requires Kodi UI.
+- Fixed `mcp_token` settings metadata so Kodi no longer logs missing `<control>` warnings for the setting.
 
 ## Future TODO
 

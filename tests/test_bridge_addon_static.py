@@ -30,11 +30,15 @@ class BridgeAddonStaticTests(unittest.TestCase):
 
     def test_settings_define_mcp_token(self):
         tree = ET.parse(SERVICE_DIR / "resources" / "settings.xml")
-        setting_ids = {
-            node.attrib.get("id")
+        settings = {
+            node.attrib.get("id"): node
             for node in tree.getroot().iter("setting")
         }
-        self.assertIn("mcp_token", setting_ids)
+        self.assertIn("mcp_token", settings)
+        control = settings["mcp_token"].find("control")
+        self.assertIsNotNone(control)
+        self.assertEqual(control.attrib["type"], "edit")
+        self.assertEqual(control.attrib["format"], "string")
 
     def test_bridge_code_has_milestone_a_routes(self):
         source = (SERVICE_DIR / "http_bridge.py").read_text(encoding="utf-8")
