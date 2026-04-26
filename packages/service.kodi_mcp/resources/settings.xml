@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<settings version="1">
+    <section id="service.kodi_mcp">
+        <category id="kodi_mcp" label="Kodi MCP">
+            <group id="1">
+                <setting id="mcp_token" type="string" label="MCP shared token" default=""/>
+            </group>
+        </category>
+    </section>
+</settings>

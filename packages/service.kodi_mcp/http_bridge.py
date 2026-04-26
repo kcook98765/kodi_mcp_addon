@@ -2,9 +2,11 @@
 """Minimal local HTTP bridge for Kodi MCP development."""
 
 import json
+import hashlib
 import os
 import threading
 import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -17,6 +19,12 @@ BRIDGE_BIND_PORT = 8765
 BRIDGE_START_TIME = time.time()
 MAX_FILE_READ_BYTES = 16384
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024
+MAX_REPO_STAGE_BYTES = 25 * 1024 * 1024
+MCP_STATE_LOCK = threading.Lock()
+MCP_STATE = {
+    "registration": None,
+    "repo_zip": None,
+}
 
 
 class KodiBridgeHandler(BaseHTTPRequestHandler):
@@ -37,6 +45,54 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
 
     def _get_addon(self):
         return xbmcaddon.Addon()
+
+    def _get_shared_token(self):
+        try:
+            return str(self._get_addon().getSetting("mcp_token") or "").strip()
+        except Exception:
+            return ""
+
+    def _request_token(self):
+        return str(self.headers.get("X-Kodi-MCP-Token", "") or "").strip()
+
+    def _authorize(self):
+        expected = self._get_shared_token()
+        if not expected:
+            return True
+        return self._request_token() == expected
+
+    def _write_auth_error_if_needed(self):
+        if self._authorize():
+            return False
+        self._write_json({"error": "unauthorized"}, status=401)
+        return True
+
+    def _read_json_body(self):
+        content_length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(content_length) if content_length > 0 else b"{}"
+        try:
+            return json.loads(body.decode("utf-8")), None
+        except Exception:
+            return None, "invalid json body"
+
+    def _standard_envelope(self, result=None, ok=True, error=None):
+        result_payload = {
+            "ok": bool(ok),
+            "error": error,
+        }
+        if isinstance(result, dict):
+            result_payload.update(result)
+        else:
+            result_payload["data"] = result
+
+        return {
+            "transport": {
+                "ok": True,
+                "bridge": "service.kodi_mcp",
+                "request_id": str(uuid.uuid4()),
+            },
+            "result": result_payload,
+        }
 
     def _get_addon_install_path(self):
         addon = self._get_addon()
@@ -59,6 +115,9 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
 
     def _get_upload_staging_dir(self):
         return xbmcvfs.translatePath("special://profile/addon_data/service.kodi_mcp/uploads")
+
+    def _get_repo_staging_dir(self):
+        return xbmcvfs.translatePath("special://profile/addon_data/service.kodi_mcp/repo_stage")
 
     def _get_runtime_info(self):
         addon = self._get_addon()
@@ -218,6 +277,53 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
             "ok": True,
         }, 200
 
+    def _write_binary_file(self, path, body):
+        parent = os.path.dirname(path)
+        if parent and not xbmcvfs.exists(parent):
+            xbmcvfs.mkdirs(parent)
+        handle = xbmcvfs.File(path, "wb")
+        try:
+            handle.write(body)
+        finally:
+            handle.close()
+
+    def _repo_stage(self, repo_id, mode, body):
+        repo_id = str(repo_id or "").strip() or "dev-repo"
+        mode = str(mode or "").strip() or "overwrite"
+        if mode != "overwrite":
+            return self._standard_envelope(ok=False, error="only overwrite mode is supported"), 400
+        if body is None or len(body) == 0:
+            return self._standard_envelope(ok=False, error="request body is required"), 400
+        if len(body) > MAX_REPO_STAGE_BYTES:
+            return self._standard_envelope(ok=False, error="repo zip exceeds max size"), 413
+        if not body.startswith(b"PK"):
+            return self._standard_envelope(ok=False, error="repo stage body must be a zip file"), 400
+
+        expected_sha = str(self.headers.get("X-Content-SHA256", "") or "").strip().lower()
+        actual_sha = hashlib.sha256(body).hexdigest()
+        if expected_sha and expected_sha != actual_sha:
+            return self._standard_envelope(ok=False, error="sha256 mismatch"), 400
+
+        staging_dir = self._get_repo_staging_dir()
+        filename = "%s.zip" % repo_id
+        saved_path = os.path.join(staging_dir, filename)
+        self._write_binary_file(saved_path, body)
+
+        repo_zip = {
+            "repo_id": repo_id,
+            "mode": mode,
+            "repo_version": str(self.headers.get("X-Repo-Version", "") or "").strip() or None,
+            "filename": filename,
+            "saved_path": saved_path,
+            "size_bytes": len(body),
+            "sha256": actual_sha,
+            "staged_at": int(time.time()),
+        }
+        with MCP_STATE_LOCK:
+            MCP_STATE["repo_zip"] = repo_zip
+
+        return self._standard_envelope(result=repo_zip), 200
+
     def _is_allowed_path(self, requested_path):
         normalized = os.path.normcase(os.path.abspath(requested_path))
         allowed_prefixes = [
@@ -230,10 +336,66 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
             return True
 
         for prefix in allowed_prefixes:
-            if normalized.startswith(prefix):
+            try:
+                if os.path.commonpath([normalized, prefix]) == prefix:
+                    return True
+            except ValueError:
+                continue
+            if normalized == prefix:
                 return True
 
         return False
+
+    def _register_mcp_server(self, payload):
+        if not isinstance(payload, dict):
+            return self._standard_envelope(ok=False, error="json object body is required"), 400
+
+        now = int(time.time())
+        try:
+            ttl_seconds = int(payload.get("ttl_seconds") or 60)
+        except Exception:
+            ttl_seconds = 60
+        ttl_seconds = max(10, min(ttl_seconds, 3600))
+
+        registration = dict(payload)
+        registration["received_at"] = now
+        registration["applied_ttl_seconds"] = ttl_seconds
+        registration["expires_at"] = now + ttl_seconds
+
+        with MCP_STATE_LOCK:
+            MCP_STATE["registration"] = registration
+
+        return self._standard_envelope(result={"registration": registration}), 200
+
+    def _mcp_state(self):
+        now = int(time.time())
+        with MCP_STATE_LOCK:
+            registration = MCP_STATE.get("registration")
+            repo_zip = MCP_STATE.get("repo_zip")
+
+        registration_present = isinstance(registration, dict)
+        registration_stale = True
+        if registration_present:
+            try:
+                registration_stale = int(registration.get("expires_at") or 0) <= now
+            except Exception:
+                registration_stale = True
+
+        repo_zip_file_exists = False
+        if isinstance(repo_zip, dict) and repo_zip.get("saved_path"):
+            repo_zip_file_exists = xbmcvfs.exists(repo_zip.get("saved_path"))
+
+        state = {
+            "registration": registration,
+            "repo_zip": repo_zip,
+        }
+        derived = {
+            "registration_present": registration_present,
+            "registration_stale": registration_stale,
+            "repo_zip_file_exists": repo_zip_file_exists,
+            "dev_setup_available": bool(registration_present and not registration_stale and repo_zip_file_exists),
+        }
+        return self._standard_envelope(result={"state": state, "derived": derived}), 200
 
     def _read_text_file(self, requested_path):
         if not requested_path:
@@ -341,6 +503,13 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urlparse(self.path)
+
+        if parsed.path == "/mcp/state":
+            if self._write_auth_error_if_needed():
+                return
+            result, status = self._mcp_state()
+            self._write_json(result, status=status)
+            return
 
         if parsed.path == "/health":
             self._write_json(
@@ -455,13 +624,33 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
 
-        if parsed.path == "/log/marker":
+        if parsed.path == "/mcp/register":
+            if self._write_auth_error_if_needed():
+                return
+            payload, error = self._read_json_body()
+            if error:
+                self._write_json(self._standard_envelope(ok=False, error=error), status=400)
+                return
+            result, status = self._register_mcp_server(payload)
+            self._write_json(result, status=status)
+            return
+
+        if parsed.path == "/repo/stage":
+            if self._write_auth_error_if_needed():
+                return
+            query = parse_qs(parsed.query)
+            repo_id = query.get("repo_id", ["dev-repo"])[0]
+            mode = query.get("mode", ["overwrite"])[0]
             content_length = int(self.headers.get("Content-Length", "0"))
-            body = self.rfile.read(content_length) if content_length > 0 else b"{}"
-            try:
-                payload = json.loads(body.decode("utf-8"))
-            except Exception:
-                self._write_json({"error": "invalid json body"}, status=400)
+            body = self.rfile.read(content_length) if content_length > 0 else b""
+            result, status = self._repo_stage(repo_id, mode, body)
+            self._write_json(result, status=status)
+            return
+
+        if parsed.path == "/log/marker":
+            payload, error = self._read_json_body()
+            if error:
+                self._write_json({"error": error}, status=400)
                 return
 
             message = str(payload.get("message", "")).strip()

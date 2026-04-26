@@ -1,10 +1,32 @@
-# kodi_addon
+# kodi_mcp_addon
 
-Planned home for Kodi-resident code and Kodi addon packages.
+Kodi-resident bridge addon packages for the Kodi MCP system.
 
-Intended ownership:
-- `service.kodi_mcp` runtime addon code
-- Kodi test/repository addon packages
-- any code that must execute inside Kodi or ship as a Kodi addon package
+## Ownership
 
-This directory is preparatory in the current step. Active runtime paths have not been moved yet.
+- `packages/service.kodi_mcp` owns the Kodi HTTP bridge addon.
+- `packages/repository.kodi_mcp_dev` owns the private development repository addon.
+- `packages/script.kodi_mcp_test` owns a small executable addon used for workflow checks.
+
+## Bridge Surface
+
+`service.kodi_mcp` listens on `0.0.0.0:8765` inside Kodi and exposes:
+
+- `/health`, `/status`, `/runtime/info`
+- `/addon/info`, `/addon/ensure-enabled`, `/addon/execute`, `/addon/version-check`
+- `/log/tail`, `/log/markers`, `/log/marker`
+- `/files/read`, `/debug/addon-db`, `/debug/ping`
+- `/mcp/register`, `/mcp/state`, `/repo/stage`
+
+The `/mcp/*` and `/repo/stage` endpoints use the standard bridge envelope expected by `kodi_mcp_server`. If the Kodi addon setting `mcp_token` is configured, callers must send the same value in the `X-Kodi-MCP-Token` header.
+
+## Local Verification
+
+From this repo:
+
+```bash
+python3 -m unittest discover -s tests
+python3 -m py_compile packages/service.kodi_mcp/http_bridge.py packages/service.kodi_mcp/service.py packages/script.kodi_mcp_test/default.py
+```
+
+No GitHub push should happen until the local Kodi workflow has been smoke-tested and the operator explicitly asks to push.
