@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, urlparse
 
 import xbmc
 import xbmcaddon
+import xbmcgui
 import xbmcvfs
 
 BRIDGE_BIND_HOST = "0.0.0.0"
@@ -314,6 +315,61 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
             }, 500
 
         return {"ok": True, "action": action, "method": method, "jsonrpc": response}, 200
+
+    def _safe_info_label(self, label):
+        try:
+            return xbmc.getInfoLabel(label) or ""
+        except Exception:
+            return ""
+
+    def _safe_cond_visibility(self, condition):
+        try:
+            return bool(xbmc.getCondVisibility(condition))
+        except Exception:
+            return False
+
+    def _safe_current_window_id(self):
+        try:
+            return xbmcgui.getCurrentWindowId()
+        except Exception:
+            return None
+
+    def _safe_current_dialog_id(self):
+        try:
+            return xbmcgui.getCurrentWindowDialogId()
+        except Exception:
+            return None
+
+    def _gui_state(self):
+        active_response, active_error = self._jsonrpc("Player.GetActivePlayers")
+        active_players = []
+        if isinstance(active_response, dict):
+            active_players = active_response.get("result") or []
+            if not isinstance(active_players, list):
+                active_players = []
+
+        current_window = self._safe_info_label("System.CurrentWindow")
+        current_control = self._safe_info_label("System.CurrentControl")
+        conditions = {
+            "fullscreen_video": self._safe_cond_visibility("Window.IsActive(fullscreenvideo)"),
+            "player_has_media": self._safe_cond_visibility("Player.HasMedia"),
+            "player_has_video": self._safe_cond_visibility("Player.HasVideo"),
+            "player_playing": self._safe_cond_visibility("Player.Playing"),
+            "player_paused": self._safe_cond_visibility("Player.Paused"),
+        }
+
+        result = {
+            "ok": active_error is None,
+            "current_window": current_window,
+            "current_window_id": self._safe_current_window_id(),
+            "current_dialog_id": self._safe_current_dialog_id(),
+            "current_control": current_control,
+            "conditions": conditions,
+            "active_players": active_players,
+            "jsonrpc": active_response,
+            "error": active_error,
+        }
+        return result, 200 if active_error is None else 500
 
     def _compute_derived_state(self, state):
         # Backwards compatible method wrapper.
@@ -766,6 +822,12 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
                             "auth_required": True,
                             "auth_header": AUTH_HEADER_TOKEN,
                         },
+                        "gui_state": {
+                            "method": "GET",
+                            "path": "/gui/state",
+                            "auth_required": True,
+                            "auth_header": AUTH_HEADER_TOKEN,
+                        },
                     },
                     "features": {
                         "liveness_probe": True,
@@ -775,6 +837,7 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
                         "mcp_registration": True,
                         "repo_zip_staging": True,
                         "gui_actions": sorted(GUI_ACTIONS.keys()),
+                        "gui_state": True,
                         "screenshots": True,
                     },
                 }
@@ -830,6 +893,11 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query)
             include_image = str(query.get("include_image", ["false"])[0]).lower() in ("1", "true", "yes")
             result, status = self._capture_screenshot(include_image=include_image)
+            self._write_json(result, status=status)
+            return
+
+        if parsed.path == "/gui/state":
+            result, status = self._gui_state()
             self._write_json(result, status=status)
             return
 

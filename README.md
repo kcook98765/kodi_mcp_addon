@@ -75,6 +75,7 @@ For split-host deployments, the MCP server should use `KODI_BRIDGE_BASE_URL=http
   - `/runtime/info` - Addon paths and configuration
   - `/capabilities`, `/control/capabilities` - Bridge capabilities
   - `/gui/action` - Basic GUI navigation actions
+  - `/gui/state` - Current Kodi GUI/window/player state
   - `/gui/screenshot` - Captures a Kodi screenshot
   - `/debug/ping` - Liveness check with timestamp
   - `/addon/*` - Addon management and version checking
@@ -98,6 +99,7 @@ Protected (require `X-Kodi-MCP-Token`):
 - `GET /mcp/state` — Read persisted registration + staging state
 - `POST /repo/stage` — Upload/stage dev repo zip to Kodi-local path
 - `POST /gui/action` — Send `up`, `down`, `left`, `right`, `select`, `back`, `home`, `context`, or `info`
+- `GET /gui/state` — Return compact Kodi GUI/window/player state for automated verification
 - `GET /gui/screenshot` — Capture a PNG screenshot under addon profile data, optionally with base64 image content
 
 Unprotected:
