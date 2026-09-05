@@ -8,8 +8,12 @@ Kodi-resident HTTP bridge service for MCP development workflows.
 - Stores MCP server registration state locally (persisted under addon_data)
 - Receives a **dev repo zip** from the MCP server and stores it in Kodi-local storage for installation
 - Provides a **user-guided** Developer setup flow (opens Kodi’s Install-from-zip UI)
+- Installs only the canonical staged `repository.kodi-mcp` bootstrap when the
+  zero-argument authenticated bootstrap operation is requested by the MCP server
+- Reports bounded read-only readiness for the fixed installed
+  `repository.kodi-mcp`, including Kodi-side metadata, checksum, and package probes
 
-It does **not** silently install zips or manage source repositories.
+It does **not** expose a generic ZIP/path/URL/addon installer or manage source repositories.
 
 ## MCP server requirement (for agent use)
 
@@ -98,6 +102,12 @@ Protected (require `X-Kodi-MCP-Token`):
 - `POST /mcp/register` — Register/refresh MCP server identity + TTL
 - `GET /mcp/state` — Read persisted registration + staging state
 - `POST /repo/stage` — Upload/stage dev repo zip to Kodi-local path
+- `POST /repo/bootstrap/install` — Install only the validated canonical
+  `repository.kodi-mcp` ZIP from the fixed bridge-owned staging slot; no caller
+  arguments are accepted. The authenticated server supplies version and SHA-256
+  staging metadata, and the bridge requires both to match the fixed-ID ZIP.
+- `GET /repo/readiness` — Inspect only installed `repository.kodi-mcp` and probe
+  its configured repository URLs from Kodi; accepts no query arguments.
 - `POST /gui/action` — Send `up`, `down`, `left`, `right`, `select`, `back`, `home`, `context`, or `info`
 - `GET /gui/state` — Return compact Kodi GUI/window/player state for automated verification
 - `GET /gui/screenshot` — Capture a PNG screenshot under addon profile data, optionally with base64 image content
@@ -107,12 +117,14 @@ Unprotected:
 
 When the MCP server stores screenshots server-side, remote clients receive a server `/screenshots/<id>.png` URL instead of a large inline image by default.
 
-### Developer setup flow (user-guided)
+### Repository bootstrap flow
 
 1) MCP server automatically registers and stages the dev repo zip (refreshes `POST /mcp/register` and `POST /repo/stage` as needed)
-3) In Kodi, the user opens:
-   **Kodi → Add-ons → Services → Kodi MCP Service → Configure**
-4) Then:
-   **Developer → Developer setup**
-5) Kodi opens **Install from zip file**
-6) The user must **manually browse** to the staged `special://...` path shown and select the staged repo zip.
+2) The zero-argument public MCP repository-bootstrap operation invokes the
+   authenticated bounded install endpoint.
+3) The bridge verifies the fixed staging slot, fixed addon ID, exact ZIP layout,
+   metadata/ZIP version agreement, and SHA-256 before installing or upgrading.
+
+The bridge contains no independent canonical repository version. It accepts the
+version bound by authenticated staging metadata only when that version exactly
+matches `addon.xml`; newer installed versions are never downgraded.
