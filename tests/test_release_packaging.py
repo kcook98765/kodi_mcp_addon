@@ -27,7 +27,7 @@ def _run(repo: Path, *args: str) -> str:
     ).stdout.strip()
 
 
-def _repo(tmp_path: Path, *, addon_id: str = release.ADDON_ID, version: str = "0.2.39") -> Path:
+def _repo(tmp_path: Path, *, addon_id: str = release.ADDON_ID, version: str = "0.2.40") -> Path:
     repo = tmp_path / "repo"
     repo.mkdir()
     _run(repo, "init", "-q")

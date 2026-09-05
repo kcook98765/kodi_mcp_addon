@@ -101,10 +101,11 @@ self-referential hash cycle. Schema version 1 remains compatible with the curren
 server bootstrap consumer; the additional size and builder-format fields are
 ignored by older schema-1 consumers.
 
-The current source version remains `0.2.39`. Deterministic artifacts produced
-while validating this builder are test evidence only and must not be published as
-a replacement `0.2.39` build. The next formal corrected release is expected to
-bump the addon to `0.2.40`; this repository does not claim that version is released.
+The current source version is prepared as `0.2.40`. Deterministic `0.2.39`
+artifacts produced while validating this builder were test evidence only and must
+not be published as replacement `0.2.39` builds. A formal `0.2.40` release still
+requires the separate review, tag, and publication gates; this repository does
+not claim that version is released.
 
 ## Files
 
