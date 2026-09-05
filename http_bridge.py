@@ -8,15 +8,23 @@ Milestone A additions:
 """
 
 import base64
+import glob
 import hashlib
 import hmac
 import json
 import os
 import re
+import shutil
+import sqlite3
+import stat
 import threading
 import time
+import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, quote, urlparse
+from urllib.request import Request, urlopen
+from xml.etree import ElementTree
 
 import xbmc
 import xbmcaddon
@@ -37,6 +45,24 @@ DEV_REPO_DIR_SPECIAL = "special://profile/addon_data/service.kodi_mcp/dev_repo"
 MAX_REPO_ZIP_UPLOAD_BYTES = 200 * 1024 * 1024  # 200 MiB
 UPLOAD_CHUNK_SIZE = 64 * 1024
 REPO_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$")
+REPOSITORY_BOOTSTRAP_ADDON_ID = "repository.kodi-mcp"
+REPOSITORY_BOOTSTRAP_REPO_ID = "dev-repo"
+REPOSITORY_BOOTSTRAP_SPECIAL_PATH = DEV_REPO_DIR_SPECIAL + "/dev-repo.zip"
+REPOSITORY_BOOTSTRAP_DEST_SPECIAL = "special://home/addons/repository.kodi-mcp"
+REPOSITORY_BOOTSTRAP_MEMBERS = frozenset(
+    (
+        "repository.kodi-mcp/addon.xml",
+        "repository.kodi-mcp/service.py",
+        "repository.kodi-mcp/addons.xml",
+    )
+)
+REPOSITORY_READINESS_MAX_ADDON_XML_BYTES = 128 * 1024
+REPOSITORY_READINESS_MAX_METADATA_BYTES = 4 * 1024 * 1024
+REPOSITORY_READINESS_MAX_CHECKSUM_BYTES = 1024
+REPOSITORY_READINESS_TIMEOUT_SECONDS = 5
+REPOSITORY_PACKAGE_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$")
+REPOSITORY_PACKAGE_VERSION_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._+~-]{0,127}$")
+SEMVER_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 GUI_ACTIONS = {
     "up": "Input.Up",
     "down": "Input.Down",
@@ -115,6 +141,100 @@ def save_state(state):
         xbmcvfs.delete(translated)
     xbmcvfs.rename(tmp_path, translated)
     return state
+
+
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        while True:
+            chunk = handle.read(64 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _semantic_version(value):
+    value = str(value or "").strip()
+    if not SEMVER_RE.match(value):
+        raise ValueError("repository bootstrap version must be semantic x.y.z")
+    return tuple(int(part) for part in value.split("."))
+
+
+def validate_repository_bootstrap(state):
+    """Validate the one bridge-owned repository bootstrap slot.
+
+    This intentionally accepts no path, URL, addon id, destination, or command.
+    The only installable object is a fixed-ID repository.kodi-mcp ZIP previously
+    staged into the bridge-owned dev-repo slot by the authenticated server. The
+    bridge binds the staged metadata version to addon.xml instead of maintaining
+    a second canonical-version constant.
+    """
+
+    repo_zip = (state or {}).get("repo_zip")
+    if not isinstance(repo_zip, dict):
+        raise ValueError("canonical repository bootstrap is not staged")
+    if repo_zip.get("repo_id") != REPOSITORY_BOOTSTRAP_REPO_ID:
+        raise ValueError("staged artifact is not the canonical repository bootstrap slot")
+    staged_version = str(repo_zip.get("repo_version") or "").strip()
+    _semantic_version(staged_version)
+    if repo_zip.get("special_path") != REPOSITORY_BOOTSTRAP_SPECIAL_PATH:
+        raise ValueError("staged repository bootstrap path is not canonical")
+
+    expected_sha256 = str(repo_zip.get("sha256") or "").lower()
+    if not re.match(r"^[0-9a-f]{64}$", expected_sha256):
+        raise ValueError("staged repository bootstrap SHA-256 is missing or invalid")
+
+    translated = _translate(REPOSITORY_BOOTSTRAP_SPECIAL_PATH)
+    if not xbmcvfs.exists(translated) or not os.path.isfile(translated):
+        raise ValueError("canonical repository bootstrap artifact is missing")
+    expected_size = repo_zip.get("size_bytes")
+    if not isinstance(expected_size, int) or expected_size < 1:
+        raise ValueError("staged repository bootstrap size is missing or invalid")
+    if os.path.getsize(translated) != expected_size:
+        raise ValueError("staged repository bootstrap size mismatch")
+
+    actual_sha256 = _sha256_file(translated)
+    if not hmac.compare_digest(expected_sha256, actual_sha256):
+        raise ValueError("staged repository bootstrap SHA-256 mismatch")
+
+    try:
+        with zipfile.ZipFile(translated, "r") as archive:
+            infos = archive.infolist()
+            names = [info.filename for info in infos]
+            if len(names) != len(set(names)) or set(names) != REPOSITORY_BOOTSTRAP_MEMBERS:
+                raise ValueError("repository bootstrap ZIP layout is not canonical")
+            for info in infos:
+                mode = (info.external_attr >> 16) & 0xFFFF
+                if info.is_dir() or stat.S_ISLNK(mode):
+                    raise ValueError("repository bootstrap ZIP contains an unsafe member")
+            addon_xml = archive.read("repository.kodi-mcp/addon.xml")
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError("repository bootstrap ZIP is invalid: %s" % exc)
+
+    try:
+        root = ElementTree.fromstring(addon_xml)
+    except Exception as exc:
+        raise ValueError("repository bootstrap addon.xml is invalid: %s" % exc)
+    if root.tag != "addon" or root.get("id") != REPOSITORY_BOOTSTRAP_ADDON_ID:
+        raise ValueError("repository bootstrap addon id is not canonical")
+    if root.get("version") != staged_version:
+        raise ValueError("repository bootstrap addon version does not match staged metadata")
+    if not any(
+        child.tag == "extension" and child.get("point") == "xbmc.addon.repository"
+        for child in list(root)
+    ):
+        raise ValueError("repository bootstrap repository extension is missing")
+
+    return {
+        "addon_id": REPOSITORY_BOOTSTRAP_ADDON_ID,
+        "version": staged_version,
+        "sha256": actual_sha256,
+        "size_bytes": expected_size,
+        "translated_path": translated,
+    }
 
 
 def compute_derived_state(state):
@@ -268,7 +388,7 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
         return True
 
     def _is_public_get_path(self, path):
-        return path in ("/health", "/status", "/runtime/info", "/capabilities", "/control/capabilities")
+        return path in ("/health", "/health/deep", "/status", "/runtime/info", "/capabilities", "/control/capabilities")
 
     def _read_json_body(self):
         content_length = int(self.headers.get("Content-Length", "0"))
@@ -292,6 +412,65 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
             return json.loads(raw), None
         except Exception as exc:
             return None, "invalid json-rpc response: %s" % exc
+
+    def _get_build_identity(self):
+        manifest_path = os.path.join(self._get_addon_install_path(), "build_manifest.json")
+        if not xbmcvfs.exists(manifest_path):
+            return None
+        handle = xbmcvfs.File(manifest_path)
+        try:
+            raw = handle.read()
+        finally:
+            handle.close()
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", "replace")
+        try:
+            manifest = json.loads(raw or "{}")
+        except Exception:
+            return None
+        if not isinstance(manifest, dict):
+            return None
+        return {
+            key: manifest.get(key)
+            for key in ("source_git_sha", "source_fingerprint_sha256")
+            if manifest.get(key)
+        } or None
+
+    def _get_shallow_health(self):
+        addon = self._get_addon()
+        return {
+            "status": "ok",
+            "service": "service.kodi_mcp",
+            "addon_id": addon.getAddonInfo("id"),
+            "version": addon.getAddonInfo("version"),
+            "build": self._get_build_identity(),
+            "health_type": "shallow",
+            "uptime_seconds": int(time.time() - BRIDGE_START_TIME),
+        }
+
+    def _get_deep_health(self):
+        addon = self._get_addon()
+        response, error = self._jsonrpc("JSONRPC.Ping")
+        jsonrpc_ok = (
+            error is None
+            and isinstance(response, dict)
+            and response.get("result") == "pong"
+        )
+        payload = {
+            "status": "ok" if jsonrpc_ok else "error",
+            "service": "service.kodi_mcp",
+            "addon_id": addon.getAddonInfo("id"),
+            "version": addon.getAddonInfo("version"),
+            "build": self._get_build_identity(),
+            "health_type": "deep",
+            "uptime_seconds": int(time.time() - BRIDGE_START_TIME),
+            "kodi_jsonrpc_ok": jsonrpc_ok,
+        }
+        if not jsonrpc_ok:
+            payload["kodi_jsonrpc_error"] = error or (
+                response.get("error") if isinstance(response, dict) else "unexpected response"
+            )
+        return payload, 200 if jsonrpc_ok else 503
 
     def _gui_action(self, action):
         action = str(action or "").strip().lower()
@@ -455,6 +634,7 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
         return {
             "addon_id": addon.getAddonInfo("id"),
             "addon_version": addon.getAddonInfo("version"),
+            "build": self._get_build_identity(),
             "addon_install_path": self._get_addon_install_path(),
             "addon_profile_path": self._get_addon_profile_path(),
             "kodi_log_path": self._get_log_path(),
@@ -501,6 +681,305 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
             "install_path": xbmcvfs.translatePath(addon.getAddonInfo("path")),
             "profile_path": xbmcvfs.translatePath(addon.getAddonInfo("profile")),
         }, 200
+
+    def _fetch_repository_url(self, url, max_bytes, first_byte_only=False):
+        """Fetch one installed-repository URL with strict size and scheme bounds."""
+
+        parsed = urlparse(str(url or "").strip())
+        if (
+            parsed.scheme not in ("http", "https")
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            return {
+                "reachable": False,
+                "http_status": None,
+                "error": "repository URL must be credential-free HTTP or HTTPS",
+            }
+
+        headers = {"User-Agent": "Kodi-MCP-Repository-Readiness/1"}
+        if first_byte_only:
+            headers["Range"] = "bytes=0-0"
+        request = Request(url, headers=headers, method="GET")
+        try:
+            with urlopen(request, timeout=REPOSITORY_READINESS_TIMEOUT_SECONDS) as response:
+                final_url = response.geturl()
+                final = urlparse(final_url)
+                if (
+                    final.scheme not in ("http", "https")
+                    or not final.hostname
+                    or final.username is not None
+                    or final.password is not None
+                ):
+                    return {
+                        "reachable": False,
+                        "http_status": getattr(response, "status", None),
+                        "error": "repository redirect target is not permitted",
+                    }
+                body = response.read(max_bytes + 1)
+                if len(body) > max_bytes:
+                    return {
+                        "reachable": False,
+                        "http_status": getattr(response, "status", None),
+                        "error": "repository response exceeds readiness size limit",
+                    }
+                return {
+                    "reachable": True,
+                    "http_status": getattr(response, "status", None),
+                    "content_type": response.headers.get("Content-Type"),
+                    "bytes_read": len(body),
+                    "body": body,
+                }
+        except HTTPError as exc:
+            return {
+                "reachable": False,
+                "http_status": exc.code,
+                "error": "repository HTTP request failed",
+            }
+        except URLError:
+            return {
+                "reachable": False,
+                "http_status": None,
+                "error": "repository URL is unreachable from Kodi",
+            }
+        except Exception:
+            return {
+                "reachable": False,
+                "http_status": None,
+                "error": "repository readiness request failed",
+            }
+
+    def _repository_catalog_evidence(self):
+        """Return best-effort, read-only evidence from Kodi's addon catalog DB."""
+
+        refresh = {
+            "observable": False,
+            "state": "unknown",
+            "reason": "Kodi exposes no stable read-only repository refresh-completion API",
+        }
+        ingestion = {
+            "observable": False,
+            "state": "unknown",
+            "reason": "Kodi addon catalog database evidence is unavailable",
+        }
+        try:
+            pattern = xbmcvfs.translatePath("special://profile/Database/Addons*.db")
+            candidates = sorted(glob.glob(pattern))
+            if not candidates:
+                return refresh, ingestion
+            connection = sqlite3.connect("file:%s?mode=ro" % candidates[-1], uri=True)
+            connection.row_factory = sqlite3.Row
+            try:
+                tables = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    ).fetchall()
+                }
+                if "repo" not in tables:
+                    return refresh, ingestion
+                row = connection.execute(
+                    "SELECT checksum, lastcheck, version, nextcheck "
+                    "FROM repo WHERE addonID = ?",
+                    (REPOSITORY_BOOTSTRAP_ADDON_ID,),
+                ).fetchone()
+                if row is None:
+                    return refresh, ingestion
+                refresh = {
+                    "observable": True,
+                    "state": "repository_record_observed",
+                    "evidence_source": "kodi_addons_database_internal",
+                    "last_check": row["lastcheck"],
+                    "next_check": row["nextcheck"],
+                    "repository_version": row["version"],
+                    "checksum": row["checksum"],
+                    "completion_proven": False,
+                    "freshness_proven": False,
+                }
+                if {"addons", "addonlinkrepo"}.issubset(tables):
+                    count = connection.execute(
+                        "SELECT COUNT(*) FROM addons a "
+                        "JOIN addonlinkrepo al ON a.id = al.idAddon "
+                        "JOIN repo r ON r.id = al.idRepo WHERE r.addonID = ?",
+                        (REPOSITORY_BOOTSTRAP_ADDON_ID,),
+                    ).fetchone()[0]
+                    ingestion = {
+                        "observable": True,
+                        "state": "entries_observed" if count else "no_entries_observed",
+                        "evidence_source": "kodi_addons_database_internal",
+                        "entry_count": int(count),
+                        "freshness_proven": False,
+                    }
+            finally:
+                connection.close()
+        except Exception:
+            return refresh, ingestion
+        return refresh, ingestion
+
+    def _repository_readiness(self):
+        """Inspect and probe only the installed repository.kodi-mcp addon."""
+
+        addon, status = self._get_addon_info(REPOSITORY_BOOTSTRAP_ADDON_ID)
+        base = {
+            "ok": True,
+            "addon_id": REPOSITORY_BOOTSTRAP_ADDON_ID,
+            "installed": bool(addon.get("installed")) if isinstance(addon, dict) else False,
+            "enabled": bool(addon.get("enabled")) if isinstance(addon, dict) else False,
+            "installed_version": addon.get("version") if isinstance(addon, dict) else None,
+            "configured_identity": {"addon_id": None, "version": None},
+            "urls": {"metadata": None, "checksum": None, "datadir": None},
+            "metadata": {"reachable": False, "parseable": False, "addon_count": None},
+            "checksum": {
+                "reachable": False,
+                "published_md5": None,
+                "computed_md5": None,
+                "match": False,
+            },
+            "package": {
+                "observable": False,
+                "reachable": False,
+                "probe_addon_id": None,
+                "probe_addon_version": None,
+                "probe_url": None,
+            },
+            "catalog_refresh": {
+                "observable": False,
+                "state": "unknown",
+                "reason": "Kodi exposes no stable read-only repository refresh-completion API",
+            },
+            "catalog_ingestion": {
+                "observable": False,
+                "state": "unknown",
+                "reason": "Kodi exposes no stable read-only repository catalog-ingestion API",
+            },
+        }
+        if status != 200 or not isinstance(addon, dict):
+            base["ok"] = False
+            base["error"] = "repository addon inspection failed"
+            return base, 200
+        if not addon.get("installed"):
+            return base, 200
+
+        addon_xml_path = os.path.join(str(addon.get("install_path") or ""), "addon.xml")
+        try:
+            if not xbmcvfs.exists(addon_xml_path):
+                raise ValueError("installed repository addon.xml is missing")
+            handle = xbmcvfs.File(addon_xml_path)
+            try:
+                raw = handle.read()
+            finally:
+                handle.close()
+            if isinstance(raw, str):
+                raw = raw.encode("utf-8")
+            if not isinstance(raw, bytes) or len(raw) > REPOSITORY_READINESS_MAX_ADDON_XML_BYTES:
+                raise ValueError("installed repository addon.xml is invalid or oversized")
+            root = ElementTree.fromstring(raw)
+            configured_id = root.get("id")
+            configured_version = root.get("version")
+            dirs = []
+            for extension in list(root):
+                if extension.tag != "extension" or extension.get("point") != "xbmc.addon.repository":
+                    continue
+                dirs.extend(child for child in list(extension) if child.tag == "dir")
+            if configured_id != REPOSITORY_BOOTSTRAP_ADDON_ID or len(dirs) != 1:
+                raise ValueError("installed repository identity or extension layout is invalid")
+            directory = dirs[0]
+            metadata_url = str(directory.findtext("info") or "").strip()
+            checksum_url = str(directory.findtext("checksum") or "").strip()
+            datadir_node = directory.find("datadir")
+            datadir_url = str(datadir_node.text if datadir_node is not None else "").strip()
+            if not metadata_url or not checksum_url or not datadir_url:
+                raise ValueError("installed repository URLs are incomplete")
+        except Exception as exc:
+            base["ok"] = False
+            base["error"] = str(exc)
+            return base, 200
+
+        base["configured_identity"] = {
+            "addon_id": configured_id,
+            "version": configured_version,
+        }
+        base["urls"] = {
+            "metadata": metadata_url,
+            "checksum": checksum_url,
+            "datadir": datadir_url,
+        }
+
+        metadata_probe = self._fetch_repository_url(
+            metadata_url, REPOSITORY_READINESS_MAX_METADATA_BYTES
+        )
+        metadata_body = metadata_probe.pop("body", None)
+        base["metadata"].update(metadata_probe)
+        metadata_root = None
+        package_candidate = None
+        if metadata_probe.get("reachable") and isinstance(metadata_body, bytes):
+            try:
+                metadata_root = ElementTree.fromstring(metadata_body)
+                if metadata_root.tag != "addons":
+                    raise ValueError("repository metadata root is not addons")
+                candidates = []
+                for child in list(metadata_root):
+                    addon_id = str(child.get("id") or "")
+                    addon_version = str(child.get("version") or "")
+                    if (
+                        child.tag == "addon"
+                        and REPOSITORY_PACKAGE_ID_RE.match(addon_id)
+                        and REPOSITORY_PACKAGE_VERSION_RE.match(addon_version)
+                    ):
+                        candidates.append((addon_id, addon_version))
+                base["metadata"]["parseable"] = True
+                base["metadata"]["addon_count"] = len(candidates)
+                package_candidate = candidates[0] if candidates else None
+            except Exception:
+                base["metadata"]["parseable"] = False
+                base["metadata"]["addon_count"] = None
+                base["metadata"]["error"] = "repository metadata is not valid Kodi addons XML"
+
+        checksum_probe = self._fetch_repository_url(
+            checksum_url, REPOSITORY_READINESS_MAX_CHECKSUM_BYTES
+        )
+        checksum_body = checksum_probe.pop("body", None)
+        base["checksum"].update(checksum_probe)
+        if isinstance(metadata_body, bytes):
+            base["checksum"]["computed_md5"] = hashlib.md5(metadata_body).hexdigest()
+        if checksum_probe.get("reachable") and isinstance(checksum_body, bytes):
+            match = re.search(rb"(?i)(?:^|\s)([0-9a-f]{32})(?:\s|$)", checksum_body.strip())
+            if match:
+                base["checksum"]["published_md5"] = match.group(1).decode("ascii").lower()
+        base["checksum"]["match"] = bool(
+            base["checksum"].get("published_md5")
+            and base["checksum"].get("computed_md5")
+            and hmac.compare_digest(
+                base["checksum"]["published_md5"], base["checksum"]["computed_md5"]
+            )
+        )
+
+        if package_candidate is not None:
+            package_id, package_version = package_candidate
+            package_filename = "%s-%s.zip" % (package_id, package_version)
+            package_url = "%s/%s/%s" % (
+                datadir_url.rstrip("/"),
+                quote(package_id, safe=""),
+                quote(package_filename, safe=""),
+            )
+            base["package"].update(
+                {
+                    "observable": True,
+                    "probe_addon_id": package_id,
+                    "probe_addon_version": package_version,
+                    "probe_url": package_url,
+                }
+            )
+            package_probe = self._fetch_repository_url(package_url, 1, first_byte_only=True)
+            package_probe.pop("body", None)
+            base["package"].update(package_probe)
+
+        catalog_refresh, catalog_ingestion = self._repository_catalog_evidence()
+        base["catalog_refresh"] = catalog_refresh
+        base["catalog_ingestion"] = catalog_ingestion
+
+        return base, 200
 
     def _ensure_addon_enabled(self, addon_id):
         result, status = self._get_addon_info(addon_id)
@@ -577,6 +1056,151 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
             "actual_version": actual_version,
             "expected_version": expected_version,
             "matches": actual_version == expected_version,
+        }, 200
+
+    def _install_repository_bootstrap(self):
+        """Install only the canonical, already-staged repository.kodi-mcp ZIP."""
+
+        try:
+            artifact = validate_repository_bootstrap(load_state())
+        except ValueError as exc:
+            return {"ok": False, "error_code": "INVALID_BOOTSTRAP", "message": str(exc)}, 409
+
+        before, before_status = self._get_addon_info(REPOSITORY_BOOTSTRAP_ADDON_ID)
+        if before_status != 200:
+            return {"ok": False, "error_code": "ADDON_INSPECTION_FAILED"}, 500
+        artifact_version = artifact.get("version")
+        action = "installed"
+        if before.get("installed"):
+            try:
+                installed_version = str(before.get("version") or "")
+                comparison = (_semantic_version(installed_version) > _semantic_version(artifact_version)) - (
+                    _semantic_version(installed_version) < _semantic_version(artifact_version)
+                )
+            except ValueError as exc:
+                return {
+                    "ok": False,
+                    "error_code": "INVALID_INSTALLED_VERSION",
+                    "addon_id": REPOSITORY_BOOTSTRAP_ADDON_ID,
+                    "canonical_version": artifact_version,
+                    "installed_version": before.get("version"),
+                    "message": str(exc),
+                }, 409
+            if comparison > 0:
+                return {
+                    "ok": False,
+                    "error_code": "DOWNGRADE_FORBIDDEN",
+                    "addon_id": REPOSITORY_BOOTSTRAP_ADDON_ID,
+                    "canonical_version": artifact_version,
+                    "installed_version": installed_version,
+                }, 409
+            if comparison < 0:
+                action = "upgraded"
+            else:
+                action = "already_installed"
+
+        if action == "already_installed":
+            if not before.get("enabled"):
+                response, error = self._jsonrpc(
+                    "Addons.SetAddonEnabled",
+                    {"addonid": REPOSITORY_BOOTSTRAP_ADDON_ID, "enabled": True},
+                )
+                if error or (isinstance(response, dict) and response.get("error")):
+                    return {"ok": False, "error_code": "ENABLE_FAILED"}, 500
+            xbmc.executebuiltin("UpdateAddonRepos", wait=False)
+            after, _ = self._get_addon_info(REPOSITORY_BOOTSTRAP_ADDON_ID)
+            if after.get("version") != artifact_version or not after.get("enabled"):
+                return {"ok": False, "error_code": "POST_INSTALL_VERIFICATION_FAILED"}, 500
+            return {
+                "ok": True,
+                "action": "already_installed",
+                "addon_id": REPOSITORY_BOOTSTRAP_ADDON_ID,
+                "version": artifact_version,
+                "enabled": bool(after.get("enabled")),
+                "artifact_sha256": artifact.get("sha256"),
+            }, 200
+
+        destination = _translate(REPOSITORY_BOOTSTRAP_DEST_SPECIAL)
+        installing = destination + ".installing"
+        backup = destination + ".previous"
+        if os.path.exists(installing):
+            shutil.rmtree(installing)
+        if os.path.exists(backup):
+            return {"ok": False, "error_code": "STALE_BACKUP_PRESENT"}, 409
+        if action == "installed" and os.path.exists(destination):
+            return {"ok": False, "error_code": "DESTINATION_ALREADY_EXISTS"}, 409
+        if action == "upgraded" and not os.path.isdir(destination):
+            return {"ok": False, "error_code": "INSTALLED_PATH_MISSING"}, 409
+
+        try:
+            os.makedirs(installing)
+            with zipfile.ZipFile(artifact["translated_path"], "r") as archive:
+                prefix = REPOSITORY_BOOTSTRAP_ADDON_ID + "/"
+                for member in sorted(REPOSITORY_BOOTSTRAP_MEMBERS):
+                    relative = member[len(prefix):]
+                    output = os.path.join(installing, relative)
+                    parent = os.path.dirname(output)
+                    if parent and not os.path.exists(parent):
+                        os.makedirs(parent)
+                    with archive.open(member, "r") as source, open(output, "wb") as target:
+                        shutil.copyfileobj(source, target, 64 * 1024)
+            if action == "upgraded":
+                os.rename(destination, backup)
+            try:
+                os.rename(installing, destination)
+            except Exception:
+                if os.path.exists(backup) and not os.path.exists(destination):
+                    os.rename(backup, destination)
+                raise
+        except Exception as exc:
+            if os.path.exists(installing):
+                shutil.rmtree(installing)
+            return {
+                "ok": False,
+                "error_code": "INSTALL_FAILED",
+                "message": "failed to install canonical repository bootstrap: %s" % exc,
+            }, 500
+
+        def restore_previous_filesystem():
+            if os.path.exists(destination):
+                shutil.rmtree(destination)
+            if os.path.exists(backup):
+                os.rename(backup, destination)
+            xbmc.executebuiltin("UpdateLocalAddons", wait=True)
+
+        xbmc.executebuiltin("UpdateLocalAddons", wait=True)
+        deadline = time.time() + 5
+        after = None
+        while time.time() < deadline:
+            after, _ = self._get_addon_info(REPOSITORY_BOOTSTRAP_ADDON_ID)
+            if after.get("installed") and after.get("version") == artifact_version:
+                break
+            time.sleep(0.25)
+        if not isinstance(after, dict) or not after.get("installed"):
+            restore_previous_filesystem()
+            return {"ok": False, "error_code": "ADDON_NOT_DISCOVERED"}, 500
+
+        response, error = self._jsonrpc(
+            "Addons.SetAddonEnabled",
+            {"addonid": REPOSITORY_BOOTSTRAP_ADDON_ID, "enabled": True},
+        )
+        if error or (isinstance(response, dict) and response.get("error")):
+            restore_previous_filesystem()
+            return {"ok": False, "error_code": "ENABLE_FAILED"}, 500
+        xbmc.executebuiltin("UpdateAddonRepos", wait=False)
+        after, _ = self._get_addon_info(REPOSITORY_BOOTSTRAP_ADDON_ID)
+        if after.get("version") != artifact_version or not after.get("enabled"):
+            restore_previous_filesystem()
+            return {"ok": False, "error_code": "POST_INSTALL_VERIFICATION_FAILED"}, 500
+        if os.path.exists(backup):
+            shutil.rmtree(backup)
+        return {
+            "ok": True,
+            "action": action,
+            "addon_id": REPOSITORY_BOOTSTRAP_ADDON_ID,
+            "version": artifact_version,
+            "enabled": True,
+            "artifact_sha256": artifact.get("sha256"),
         }, 200
 
     def _upload_addon_zip(self, filename, body):
@@ -736,15 +1360,12 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/health":
-            addon = xbmcaddon.Addon()
-            self._write_json(
-                {
-                    "status": "ok",
-                    "service": "service.kodi_mcp",
-                    "addon_id": addon.getAddonInfo("id"),
-                    "version": addon.getAddonInfo("version"),
-                }
-            )
+            self._write_json(self._get_shallow_health())
+            return
+
+        if parsed.path == "/health/deep":
+            payload, status = self._get_deep_health()
+            self._write_json(payload, status=status)
             return
 
         if parsed.path == "/ping":
@@ -765,6 +1386,7 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
                 {
                     "addon_id": addon.getAddonInfo("id"),
                     "version": addon.getAddonInfo("version"),
+                    "build": self._get_build_identity(),
                 }
             )
             return
@@ -810,6 +1432,20 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
                             "auth_required": True,
                             "auth_header": AUTH_HEADER_TOKEN,
                         },
+                        "repository_bootstrap_install": {
+                            "method": "POST",
+                            "path": "/repo/bootstrap/install",
+                            "auth_required": True,
+                            "auth_header": AUTH_HEADER_TOKEN,
+                            "caller_arguments": [],
+                        },
+                        "repository_readiness": {
+                            "method": "GET",
+                            "path": "/repo/readiness",
+                            "auth_required": True,
+                            "auth_header": AUTH_HEADER_TOKEN,
+                            "caller_arguments": [],
+                        },
                         "gui_action": {
                             "method": "POST",
                             "path": "/gui/action",
@@ -836,6 +1472,8 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
                         "lifecycle_control": False,
                         "mcp_registration": True,
                         "repo_zip_staging": True,
+                        "repository_bootstrap_install": True,
+                        "repository_readiness": True,
                         "gui_actions": sorted(GUI_ACTIONS.keys()),
                         "gui_state": True,
                         "screenshots": True,
@@ -877,6 +1515,7 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
                 {
                     "addon_id": addon.getAddonInfo("id"),
                     "addon_version": addon.getAddonInfo("version"),
+                    "build": self._get_build_identity(),
                     "bind_host": BRIDGE_BIND_HOST,
                     "bind_port": BRIDGE_BIND_PORT,
                     "log_path": self._get_log_path(),
@@ -920,6 +1559,16 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
             addon_id = query.get("addonid", [""])[0]
             result, status = self._get_addon_info(addon_id)
             self._write_json(result, status=status)
+            return
+
+        if parsed.path == "/repo/readiness":
+            if parsed.query:
+                self._write_envelope(
+                    {"ok": False, "error_code": "ARGUMENTS_FORBIDDEN"}, status=400
+                )
+                return
+            result, status = self._repository_readiness()
+            self._write_envelope(result, status=status)
             return
 
         if parsed.path == "/log/tail":
@@ -1412,6 +2061,24 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
                 },
                 status=200,
             )
+            return
+
+        if parsed.path == "/repo/bootstrap/install":
+            if not self._require_token_auth():
+                return
+            if parsed.query:
+                self._write_envelope(
+                    {"ok": False, "error_code": "ARGUMENTS_FORBIDDEN"}, status=400
+                )
+                return
+            body, body_error = self._read_json_body()
+            if body_error or not isinstance(body, dict) or body:
+                self._write_envelope(
+                    {"ok": False, "error_code": "ARGUMENTS_FORBIDDEN"}, status=400
+                )
+                return
+            result, status = self._install_repository_bootstrap()
+            self._write_envelope(result, status=status)
             return
 
         if parsed.path == "/repo/refresh":
