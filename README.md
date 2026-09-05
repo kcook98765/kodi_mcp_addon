@@ -69,6 +69,43 @@ For split-host deployments, the MCP server should use `KODI_BRIDGE_BASE_URL=http
 - Zip repo root and install as addon
 - Restart Kodi to load service
 
+### Deterministic release bundle
+
+Release artifacts must be built from exact committed source, not mutable checkout
+bytes. From a clean checkout, run:
+
+```bash
+python build_bridge_release.py build \
+  --commit "$(git rev-parse HEAD)" \
+  --output-dir dist
+python build_bridge_release.py verify \
+  --manifest dist/bridge-bootstrap.json
+```
+
+The builder reads blobs from the named Git commit, sorts paths, uses the fixed ZIP
+timestamp `1980-01-01 00:00:00`, normalizes regular-file permissions to `0644`,
+and uses `ZIP_STORED`. Checkout location, mtimes, timezone, umask, and file creation
+order therefore do not affect the result. Dirty working trees fail closed.
+
+The source fingerprint is SHA-256 over each committed regular file in canonical
+POSIX path order, feeding `path`, a NUL byte, file bytes, and another NUL byte.
+Generated `build_manifest.json`, ZIP metadata, VCS data, caches, and runtime files
+are not part of that source fingerprint. Symlinks, special files, unsafe paths,
+case-fold collisions, and duplicate normalized paths are rejected.
+
+The ZIP's `build_manifest.json` contains only its builder format, exact source
+commit, and source fingerprint. The external deterministic
+`bridge-bootstrap.json` binds those values to the addon ID/version and final ZIP
+filename, SHA-256, and size. Keeping the final ZIP hash outside the ZIP avoids a
+self-referential hash cycle. Schema version 1 remains compatible with the current
+server bootstrap consumer; the additional size and builder-format fields are
+ignored by older schema-1 consumers.
+
+The current source version remains `0.2.39`. Deterministic artifacts produced
+while validating this builder are test evidence only and must not be published as
+a replacement `0.2.39` build. The next formal corrected release is expected to
+bump the addon to `0.2.40`; this repository does not claim that version is released.
+
 ## Files
 
 - `addon.xml` - Addon manifest, points to `service.py` as entry point
