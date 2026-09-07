@@ -15,6 +15,8 @@ import json
 import os
 import re
 import shutil
+
+import subtitle_overlay
 import sqlite3
 import stat
 import threading
@@ -1647,6 +1649,26 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
 
             result, status = self._gui_action((payload or {}).get("action"))
             self._write_json(result, status=status)
+            return
+
+        if parsed.path == "/gui/subtitle":
+            payload, error = self._read_json_body()
+            if error:
+                self._write_json({"error": error}, status=400)
+                return
+            payload = payload or {}
+            lines = payload.get("lines")
+            if not isinstance(lines, list):
+                self._write_json({"error": "lines must be a list"}, status=400)
+                return
+            ttl = float(payload.get("ttl", subtitle_overlay.DEFAULT_TTL) or 0)
+            ok = subtitle_overlay.get_overlay().show(lines, ttl=ttl)
+            self._write_json({"status": "ok" if ok else "error", "visible": ok})
+            return
+
+        if parsed.path == "/gui/subtitle/clear":
+            subtitle_overlay.get_overlay().hide()
+            self._write_json({"status": "ok", "visible": False})
             return
 
         if parsed.path == "/log/marker":

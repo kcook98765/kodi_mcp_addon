@@ -7,10 +7,10 @@ from pathlib import Path
 from xml.etree import ElementTree
 
 
-def test_declared_addon_version_is_0_2_40():
+def test_declared_addon_version_is_0_2_41():
     root = ElementTree.parse(Path(__file__).parents[1] / "addon.xml").getroot()
     assert root.attrib["id"] == "service.kodi_mcp"
-    assert root.attrib["version"] == "0.2.40"
+    assert root.attrib["version"] == "0.2.41"
 
 
 def _install_kodi_stubs():
