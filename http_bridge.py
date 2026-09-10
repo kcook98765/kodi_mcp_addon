@@ -344,6 +344,116 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
 
     server_version = "KodiMCPBridge/0.1"
 
+    def _staged_repository_status(self):
+        """Read actual bytes from the one fixed staged repository slot."""
+
+        state = load_state()
+        repo_zip = (state or {}).get("repo_zip")
+        metadata_present = isinstance(repo_zip, dict)
+        translated = _translate(REPOSITORY_BOOTSTRAP_SPECIAL_PATH)
+        if not xbmcvfs.exists(translated):
+            return {
+                "ok": True,
+                "exists": False,
+                "size_bytes": None,
+                "sha256": None,
+                "metadata_present": metadata_present,
+                "metadata_consistent": False,
+            }, 200
+
+        digest = hashlib.sha256()
+        size_bytes = 0
+        try:
+            with open(translated, "rb") as handle:
+                opened_stat = os.fstat(handle.fileno())
+                while True:
+                    remaining = MAX_REPO_ZIP_UPLOAD_BYTES - size_bytes
+                    read_size = min(UPLOAD_CHUNK_SIZE, remaining + 1)
+                    chunk = handle.read(read_size)
+                    if not chunk:
+                        break
+                    size_bytes += len(chunk)
+                    if size_bytes > MAX_REPO_ZIP_UPLOAD_BYTES:
+                        return {
+                            "ok": False,
+                            "error_code": "STAGED_REPOSITORY_TOO_LARGE",
+                            "message": "staged repository artifact exceeds the supported size limit",
+                        }, 500
+                    digest.update(chunk)
+                finished_stat = os.fstat(handle.fileno())
+                try:
+                    path_stat = os.stat(translated)
+                except FileNotFoundError:
+                    return {
+                        "ok": False,
+                        "error_code": "STAGED_REPOSITORY_CHANGED_DURING_READ",
+                        "message": "staged repository artifact changed during read",
+                    }, 409
+                opened_identity = (
+                    opened_stat.st_dev,
+                    opened_stat.st_ino,
+                    opened_stat.st_size,
+                    opened_stat.st_mtime_ns,
+                )
+                finished_identity = (
+                    finished_stat.st_dev,
+                    finished_stat.st_ino,
+                    finished_stat.st_size,
+                    finished_stat.st_mtime_ns,
+                )
+                path_identity = (
+                    path_stat.st_dev,
+                    path_stat.st_ino,
+                    path_stat.st_size,
+                    path_stat.st_mtime_ns,
+                )
+                if (
+                    opened_identity != finished_identity
+                    or finished_identity != path_identity
+                    or size_bytes != finished_stat.st_size
+                ):
+                    return {
+                        "ok": False,
+                        "error_code": "STAGED_REPOSITORY_CHANGED_DURING_READ",
+                        "message": "staged repository artifact changed during read",
+                    }, 409
+        except Exception:
+            return {
+                "ok": False,
+                "error_code": "STAGED_REPOSITORY_READ_FAILED",
+                "message": "staged repository artifact could not be read",
+            }, 500
+        actual_sha256 = digest.hexdigest()
+        metadata_repo_id = repo_zip.get("repo_id") if metadata_present else None
+        metadata_special_path = repo_zip.get("special_path") if metadata_present else None
+        metadata_size_bytes = repo_zip.get("size_bytes") if metadata_present else None
+        metadata_sha256 = repo_zip.get("sha256") if metadata_present else None
+        normalized_metadata_sha256 = (
+            metadata_sha256.lower() if isinstance(metadata_sha256, str) else None
+        )
+        metadata_consistent = bool(
+            metadata_present
+            and isinstance(metadata_repo_id, str)
+            and metadata_repo_id == REPOSITORY_BOOTSTRAP_REPO_ID
+            and isinstance(metadata_special_path, str)
+            and metadata_special_path == REPOSITORY_BOOTSTRAP_SPECIAL_PATH
+            and isinstance(metadata_size_bytes, int)
+            and not isinstance(metadata_size_bytes, bool)
+            and metadata_size_bytes >= 0
+            and metadata_size_bytes == size_bytes
+            and isinstance(metadata_sha256, str)
+            and re.fullmatch(r"[0-9a-f]{64}", normalized_metadata_sha256) is not None
+            and hmac.compare_digest(normalized_metadata_sha256, actual_sha256)
+        )
+        return {
+            "ok": True,
+            "exists": True,
+            "size_bytes": size_bytes,
+            "sha256": actual_sha256,
+            "metadata_present": metadata_present,
+            "metadata_consistent": metadata_consistent,
+        }, 200
+
     def log_message(self, format, *args):
         xbmc.log("[service.kodi_mcp] " + (format % args), xbmc.LOGDEBUG)
 
@@ -1432,6 +1542,13 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
                             "auth_required": True,
                             "auth_header": AUTH_HEADER_TOKEN,
                         },
+                        "repo_staged_status": {
+                            "method": "GET",
+                            "path": "/repo/staged/status",
+                            "auth_required": True,
+                            "auth_header": AUTH_HEADER_TOKEN,
+                            "caller_arguments": [],
+                        },
                         "repository_bootstrap_install": {
                             "method": "POST",
                             "path": "/repo/bootstrap/install",
@@ -1559,6 +1676,16 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
             addon_id = query.get("addonid", [""])[0]
             result, status = self._get_addon_info(addon_id)
             self._write_json(result, status=status)
+            return
+
+        if parsed.path == "/repo/staged/status":
+            if parsed.query:
+                self._write_envelope(
+                    {"ok": False, "error_code": "ARGUMENTS_FORBIDDEN"}, status=400
+                )
+                return
+            result, status = self._staged_repository_status()
+            self._write_envelope(result, status=status)
             return
 
         if parsed.path == "/repo/readiness":
