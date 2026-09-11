@@ -8,6 +8,7 @@ Milestone A additions:
 """
 
 import base64
+import errno
 import glob
 import hashlib
 import hmac
@@ -19,6 +20,7 @@ import sqlite3
 import stat
 import threading
 import time
+import uuid
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
@@ -44,6 +46,15 @@ STATE_SPECIAL_PATH = "special://profile/addon_data/service.kodi_mcp/state.json"
 DEV_REPO_DIR_SPECIAL = "special://profile/addon_data/service.kodi_mcp/dev_repo"
 MAX_REPO_ZIP_UPLOAD_BYTES = 200 * 1024 * 1024  # 200 MiB
 UPLOAD_CHUNK_SIZE = 64 * 1024
+REPO_STAGE_SLOT_LOCK = threading.Lock()
+STATE_MUTATION_LOCK = threading.RLock()
+# Canonical nested order: REPO_STAGE_SLOT_LOCK -> STATE_MUTATION_LOCK.
+# Non-staging state writers must never acquire the slot lock.
+ATOMIC_LINK_SUPPORTED = "supported"
+ATOMIC_LINK_UNSUPPORTED = "unsupported"
+ATOMIC_LINK_ERROR = "error"
+_ATOMIC_FAIL_IF_EXISTS_CACHE = None
+_ATOMIC_FAIL_IF_EXISTS_PROBE_LOCK = threading.Lock()
 REPO_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$")
 REPOSITORY_BOOTSTRAP_ADDON_ID = "repository.kodi-mcp"
 REPOSITORY_BOOTSTRAP_REPO_ID = "dev-repo"
@@ -84,6 +95,211 @@ def _translate(special_path):
     return xbmcvfs.translatePath(special_path)
 
 
+def _translated_local_path(special_path):
+    """Translate one bridge-owned profile path and reject unresolved VFS URLs."""
+
+    translated = str(_translate(special_path) or "")
+    if not translated or "://" in translated or not os.path.isabs(translated):
+        raise OSError("bridge profile path is not a local filesystem path")
+    return os.path.normpath(translated)
+
+
+class _OwnedTemp(object):
+    def __init__(self, path, descriptor, file_stat):
+        self.path = path
+        self.descriptor = descriptor
+        self.device = file_stat.st_dev
+        self.inode = file_stat.st_ino
+
+
+def _create_owned_temp(path):
+    """Create and retain an exclusive regular-file descriptor for one temp."""
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags, 0o600)
+    file_stat = None
+    try:
+        file_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise OSError("owned temp is not a regular file")
+        return _OwnedTemp(path, descriptor, file_stat)
+    except Exception:
+        try:
+            os.close(descriptor)
+        except Exception:
+            pass
+        if file_stat is not None:
+            _cleanup_owned_path(path, file_stat.st_dev, file_stat.st_ino)
+        raise
+
+
+def _write_owned_temp(owned, body):
+    """Write one buffer completely through the retained owned descriptor."""
+
+    offset = 0
+    while offset < len(body):
+        written = os.write(owned.descriptor, body[offset:])
+        if written <= 0:
+            raise OSError("owned temp write failed")
+        offset += written
+
+
+def _sync_and_close_owned_temp(owned):
+    """Best-effort crash durability plus mandatory descriptor close."""
+
+    if owned.descriptor is None:
+        return
+    os.fsync(owned.descriptor)
+    file_stat = os.fstat(owned.descriptor)
+    if (
+        not stat.S_ISREG(file_stat.st_mode)
+        or file_stat.st_dev != owned.device
+        or file_stat.st_ino != owned.inode
+    ):
+        raise OSError("owned temp descriptor identity changed")
+    os.close(owned.descriptor)
+    owned.descriptor = None
+
+
+def _owned_temp_path_matches(owned):
+    try:
+        path_stat = os.lstat(owned.path)
+    except (FileNotFoundError, OSError):
+        return False
+    return bool(
+        stat.S_ISREG(path_stat.st_mode)
+        and path_stat.st_dev == owned.device
+        and path_stat.st_ino == owned.inode
+    )
+
+
+def _require_owned_temp_path(owned):
+    if not _owned_temp_path_matches(owned):
+        raise OSError("owned temp path identity changed")
+
+
+def _cleanup_owned_path(path, device, inode):
+    if not os.path.lexists(path):
+        return True
+    try:
+        path_stat = os.lstat(path)
+    except Exception:
+        return False
+    if (
+        not stat.S_ISREG(path_stat.st_mode)
+        or path_stat.st_dev != device
+        or path_stat.st_ino != inode
+    ):
+        return False
+    try:
+        os.unlink(path)
+    except Exception:
+        return False
+    return not os.path.lexists(path)
+
+
+def _cleanup_owned_temp(owned):
+    """Close and unlink only while the path still names this operation's inode."""
+
+    if owned is None:
+        return True
+    close_ok = True
+    if owned.descriptor is not None:
+        try:
+            os.close(owned.descriptor)
+        except Exception:
+            close_ok = False
+        owned.descriptor = None
+    return close_ok and _cleanup_owned_path(owned.path, owned.device, owned.inode)
+
+
+def _probe_atomic_fail_if_exists():
+    """Prove hard-link no-replace behavior on the actual staging filesystem."""
+
+    source_owned = None
+    destination_created = False
+    destination_identity = None
+    status = ATOMIC_LINK_ERROR
+    try:
+        directory = _translated_local_path(DEV_REPO_DIR_SPECIAL)
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        token = uuid.uuid4().hex
+        source = os.path.join(directory, ".atomic-link-probe-%s.src" % token)
+        destination = os.path.join(directory, ".atomic-link-probe-%s.dst" % token)
+        payload = b"kodi-mcp-atomic-link-probe"
+
+        source_owned = _create_owned_temp(source)
+        _write_owned_temp(source_owned, payload)
+        _sync_and_close_owned_temp(source_owned)
+        _require_owned_temp_path(source_owned)
+
+        try:
+            os.link(source, destination)
+        except OSError as exc:
+            unsupported = {
+                errno.EPERM,
+                errno.EXDEV,
+                getattr(errno, "ENOTSUP", errno.EPERM),
+                getattr(errno, "EOPNOTSUPP", errno.EPERM),
+                getattr(errno, "ENOSYS", errno.EPERM),
+            }
+            if exc.errno in unsupported:
+                status = ATOMIC_LINK_UNSUPPORTED
+        else:
+            destination_created = True
+            destination_identity = (source_owned.device, source_owned.inode)
+            destination_stat = os.lstat(destination)
+            if not stat.S_ISREG(destination_stat.st_mode):
+                raise OSError("probe destination identity mismatch")
+            with open(destination, "rb") as handle:
+                if handle.read(len(payload) + 1) != payload:
+                    raise OSError("probe destination bytes mismatch")
+
+            try:
+                os.link(source, destination)
+            except OSError as exc:
+                if exc.errno != errno.EEXIST:
+                    raise
+            else:
+                raise OSError("probe no-replace check unexpectedly succeeded")
+
+            final_stat = os.lstat(destination)
+            with open(destination, "rb") as handle:
+                final_body = handle.read(len(payload) + 1)
+            if (
+                not stat.S_ISREG(final_stat.st_mode)
+                or (final_stat.st_dev, final_stat.st_ino) != destination_identity
+                or final_body != payload
+            ):
+                raise OSError("probe destination changed")
+            status = ATOMIC_LINK_SUPPORTED
+    except Exception:
+        status = ATOMIC_LINK_ERROR
+
+    cleanup_ok = True
+    if destination_created:
+        cleanup_ok = _cleanup_owned_path(
+            destination, destination_identity[0], destination_identity[1]
+        )
+    if source_owned is not None:
+        cleanup_ok = _cleanup_owned_temp(source_owned) and cleanup_ok
+    if not cleanup_ok:
+        status = ATOMIC_LINK_ERROR
+    return status
+
+
+def _atomic_fail_if_exists_status():
+    """Return the process-cached atomic-link capability status."""
+
+    global _ATOMIC_FAIL_IF_EXISTS_CACHE
+    with _ATOMIC_FAIL_IF_EXISTS_PROBE_LOCK:
+        if _ATOMIC_FAIL_IF_EXISTS_CACHE is None:
+            _ATOMIC_FAIL_IF_EXISTS_CACHE = _probe_atomic_fail_if_exists()
+        return _ATOMIC_FAIL_IF_EXISTS_CACHE
+
+
 def load_state():
     """Load persisted state.json (or return an empty initialized state)."""
 
@@ -115,32 +331,30 @@ def load_state():
 
 
 def save_state(state):
-    """Persist state.json; increments state_rev."""
+    """Persist state.json through one owned local temp and atomic replacement."""
 
-    if not isinstance(state, dict):
-        state = {"schema_version": STATE_SCHEMA_VERSION, "state_rev": 0}
+    with STATE_MUTATION_LOCK:
+        candidate = dict(state) if isinstance(state, dict) else {}
+        candidate["schema_version"] = STATE_SCHEMA_VERSION
+        candidate["state_rev"] = int(candidate.get("state_rev") or 0) + 1
 
-    state["schema_version"] = STATE_SCHEMA_VERSION
-    state["state_rev"] = int(state.get("state_rev") or 0) + 1
+        translated = _translated_local_path(STATE_SPECIAL_PATH)
+        parent_dir = os.path.dirname(translated)
+        if parent_dir:
+            os.makedirs(parent_dir, mode=0o700, exist_ok=True)
 
-    translated = _translate(STATE_SPECIAL_PATH)
-    parent_dir = os.path.dirname(translated)
-    if parent_dir and not xbmcvfs.exists(parent_dir):
-        xbmcvfs.mkdirs(parent_dir)
-
-    tmp_path = translated + ".tmp"
-    body = json.dumps(state, indent=2, sort_keys=True).encode("utf-8")
-
-    handle = xbmcvfs.File(tmp_path, "wb")
-    try:
-        handle.write(body)
-    finally:
-        handle.close()
-
-    if xbmcvfs.exists(translated):
-        xbmcvfs.delete(translated)
-    xbmcvfs.rename(tmp_path, translated)
-    return state
+        tmp_path = translated + ".tmp." + uuid.uuid4().hex
+        body = json.dumps(candidate, indent=2, sort_keys=True).encode("utf-8")
+        owned = None
+        try:
+            owned = _create_owned_temp(tmp_path)
+            _write_owned_temp(owned, body)
+            _sync_and_close_owned_temp(owned)
+            _require_owned_temp_path(owned)
+            os.replace(tmp_path, translated)
+            return candidate
+        finally:
+            _cleanup_owned_temp(owned)
 
 
 def _sha256_file(path):
@@ -1503,6 +1717,9 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
 
         if parsed.path in ("/capabilities", "/control/capabilities"):
             addon = xbmcaddon.Addon()
+            atomic_fail_if_exists = (
+                _atomic_fail_if_exists_status() == ATOMIC_LINK_SUPPORTED
+            )
             self._write_json(
                 {
                     "addon_id": addon.getAddonInfo("id"),
@@ -1541,6 +1758,8 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
                             "path": "/repo/stage",
                             "auth_required": True,
                             "auth_header": AUTH_HEADER_TOKEN,
+                            "modes": ["overwrite", "fail_if_exists"],
+                            "atomic_fail_if_exists": atomic_fail_if_exists,
                         },
                         "repo_staged_status": {
                             "method": "GET",
@@ -1955,9 +2174,21 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
                 "features": {"repo_zip_staging": repo_zip_staging},
             }
 
-            state = load_state()
-            state["registration"] = registration
-            state = save_state(state)
+            try:
+                with STATE_MUTATION_LOCK:
+                    state = load_state()
+                    state["registration"] = registration
+                    state = save_state(state)
+            except Exception:
+                self._write_envelope(
+                    {
+                        "ok": False,
+                        "error_code": "STATE_PERSIST_FAILED",
+                        "message": "registration state could not be persisted",
+                    },
+                    status=500,
+                )
+                return
 
             expires_at = now + applied_ttl
             self._write_envelope(
@@ -2011,6 +2242,20 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
                         "allowed": ["overwrite", "fail_if_exists"],
                     },
                     status=400,
+                )
+                return
+
+            if (
+                mode == "fail_if_exists"
+                and _atomic_fail_if_exists_status() != ATOMIC_LINK_SUPPORTED
+            ):
+                self._write_envelope(
+                    {
+                        "ok": False,
+                        "error_code": "ATOMIC_FAIL_IF_EXISTS_UNSUPPORTED",
+                        "message": "atomic conditional staging is unavailable",
+                    },
+                    status=503,
                 )
                 return
 
@@ -2079,43 +2324,87 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
             repo_version = str(self.headers.get("X-Repo-Version") or "").strip() or None
 
             # Prepare paths
-            dir_translated = _translate(DEV_REPO_DIR_SPECIAL)
-            if not xbmcvfs.exists(dir_translated):
-                xbmcvfs.mkdirs(dir_translated)
-
-            special_tmp = "%s/%s.zip.tmp" % (DEV_REPO_DIR_SPECIAL.rstrip("/"), repo_id)
-            special_final = "%s/%s.zip" % (DEV_REPO_DIR_SPECIAL.rstrip("/"), repo_id)
-            tmp_translated = _translate(special_tmp)
-            final_translated = _translate(special_final)
-
-            if mode == "fail_if_exists" and xbmcvfs.exists(final_translated):
+            try:
+                dir_translated = _translated_local_path(DEV_REPO_DIR_SPECIAL)
+                os.makedirs(dir_translated, mode=0o700, exist_ok=True)
+            except Exception:
                 self._write_envelope(
-                    {"ok": False, "error_code": "ALREADY_EXISTS", "message": "repo zip already staged"},
-                    status=200,
+                    {
+                        "ok": False,
+                        "error_code": "UPLOAD_FAILED",
+                        "message": "staging directory could not be created",
+                    },
+                    status=500,
+                )
+                return
+
+            token = uuid.uuid4().hex
+            special_final = "%s/%s.zip" % (DEV_REPO_DIR_SPECIAL.rstrip("/"), repo_id)
+            tmp_translated = os.path.join(
+                dir_translated, "%s.zip.%s.tmp" % (repo_id, token)
+            )
+            final_translated = os.path.join(dir_translated, "%s.zip" % repo_id)
+
+            if mode == "fail_if_exists":
+                with REPO_STAGE_SLOT_LOCK:
+                    if os.path.lexists(final_translated):
+                        self._write_envelope(
+                            {
+                                "ok": False,
+                                "error_code": "ALREADY_EXISTS",
+                                "message": "repo zip already staged",
+                            },
+                            status=200,
+                        )
+                        return
+
+            owned = None
+            try:
+                owned = _create_owned_temp(tmp_translated)
+            except Exception:
+                self._write_envelope(
+                    {
+                        "ok": False,
+                        "error_code": "UPLOAD_FAILED",
+                        "message": "private staging temp could not be created",
+                    },
+                    status=500,
                 )
                 return
 
             # Stream upload to tmp and compute SHA256
             sha = hashlib.sha256()
             remaining = content_length
-            handle = xbmcvfs.File(tmp_translated, "wb")
             bytes_written = 0
+            upload_failed = False
             try:
                 while remaining > 0:
                     to_read = UPLOAD_CHUNK_SIZE if remaining > UPLOAD_CHUNK_SIZE else remaining
                     chunk = self.rfile.read(to_read)
                     if not chunk:
                         break
+                    _write_owned_temp(owned, chunk)
                     sha.update(chunk)
-                    handle.write(chunk)
                     bytes_written += len(chunk)
                     remaining -= len(chunk)
-            finally:
-                handle.close()
+                _sync_and_close_owned_temp(owned)
+            except Exception:
+                upload_failed = True
+
+            if upload_failed:
+                _cleanup_owned_temp(owned)
+                self._write_envelope(
+                    {
+                        "ok": False,
+                        "error_code": "UPLOAD_FAILED",
+                        "message": "failed to receive staged zip",
+                    },
+                    status=500,
+                )
+                return
 
             if bytes_written != content_length:
-                if xbmcvfs.exists(tmp_translated):
-                    xbmcvfs.delete(tmp_translated)
+                _cleanup_owned_temp(owned)
                 self._write_envelope(
                     {
                         "ok": False,
@@ -2129,8 +2418,7 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
 
             actual_sha256 = sha.hexdigest()
             if expected_sha256 and not hmac.compare_digest(expected_sha256, actual_sha256):
-                if xbmcvfs.exists(tmp_translated):
-                    xbmcvfs.delete(tmp_translated)
+                _cleanup_owned_temp(owned)
                 self._write_envelope(
                     {
                         "ok": False,
@@ -2142,32 +2430,67 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
                 )
                 return
 
-            # Activate: overwrite active staged zip directly
-            if xbmcvfs.exists(final_translated):
-                xbmcvfs.delete(final_translated)
-            if not xbmcvfs.rename(tmp_translated, final_translated):
-                # best-effort cleanup
-                if xbmcvfs.exists(tmp_translated):
-                    xbmcvfs.delete(tmp_translated)
+            try:
+                with REPO_STAGE_SLOT_LOCK:
+                    if mode == "fail_if_exists":
+                        if os.path.lexists(final_translated):
+                            _cleanup_owned_temp(owned)
+                            self._write_envelope(
+                                {
+                                    "ok": False,
+                                    "error_code": "ALREADY_EXISTS",
+                                    "message": "repo zip already staged",
+                                },
+                                status=200,
+                            )
+                            return
+                        _require_owned_temp_path(owned)
+                        try:
+                            os.link(owned.path, final_translated)
+                        except OSError as exc:
+                            if exc.errno == errno.EEXIST:
+                                _cleanup_owned_temp(owned)
+                                self._write_envelope(
+                                    {
+                                        "ok": False,
+                                        "error_code": "ALREADY_EXISTS",
+                                        "message": "repo zip already staged",
+                                    },
+                                    status=200,
+                                )
+                                return
+                            raise
+                        if not _cleanup_owned_temp(owned):
+                            raise OSError("failed to clean activated staging temp")
+                    else:
+                        _require_owned_temp_path(owned)
+                        os.replace(owned.path, final_translated)
+
+                    now = _now_epoch_seconds()
+                    repo_zip = {
+                        "repo_id": repo_id,
+                        "repo_version": repo_version,
+                        "special_path": special_final,
+                        "size_bytes": content_length,
+                        "sha256": actual_sha256,
+                        "staged_at": now,
+                    }
+
+                    with STATE_MUTATION_LOCK:
+                        state = load_state()
+                        state["repo_zip"] = repo_zip
+                        state = save_state(state)
+            except Exception:
+                _cleanup_owned_temp(owned)
                 self._write_envelope(
-                    {"ok": False, "error_code": "STAGE_FAILED", "message": "failed to activate staged zip"},
+                    {
+                        "ok": False,
+                        "error_code": "STAGE_FAILED",
+                        "message": "failed to activate staged zip or persist metadata",
+                    },
                     status=500,
                 )
                 return
-
-            now = _now_epoch_seconds()
-            repo_zip = {
-                "repo_id": repo_id,
-                "repo_version": repo_version,
-                "special_path": special_final,
-                "size_bytes": content_length,
-                "sha256": actual_sha256,
-                "staged_at": now,
-            }
-
-            state = load_state()
-            state["repo_zip"] = repo_zip
-            state = save_state(state)
 
             self._write_envelope(
                 {
@@ -2183,7 +2506,7 @@ class KodiBridgeHandler(BaseHTTPRequestHandler):
                         "staged_at": repo_zip.get("staged_at"),
                     },
                     "derived": {
-                        "repo_zip_file_exists": xbmcvfs.exists(final_translated),
+                        "repo_zip_file_exists": os.path.isfile(final_translated),
                     },
                 },
                 status=200,
